@@ -17,9 +17,8 @@ import {
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 
-// The composer draft's `modelSelectionByProvider` and
-// `stickyModelSelectionByProvider` maps are keyed by `ProviderInstanceId`
-// in production; these aliases keep the legacy-key migration tests concise.
+// Composer draft model selections are keyed by `ProviderInstanceId`; these
+// aliases keep the provider and migration tests concise.
 const CODEX_INSTANCE = ProviderInstanceId.make("codex");
 const CODEX_SECONDARY_INSTANCE = ProviderInstanceId.make("codex_secondary");
 const CLAUDE_AGENT_INSTANCE = ProviderInstanceId.make("claudeAgent");
@@ -129,8 +128,7 @@ function resetComposerDraftStore() {
     draftsByThreadKey: {},
     draftThreadsByThreadKey: {},
     logicalProjectDraftThreadKeyByLogicalProjectKey: {},
-    stickyModelSelectionByProvider: {},
-    stickyActiveProvider: null,
+    projectModelSelectionByProjectKey: {},
   });
 }
 
@@ -299,8 +297,7 @@ describe("composerDraftStore syncPersistedAttachments", () => {
       draftsByThreadKey: {},
       draftThreadsByThreadKey: {},
       logicalProjectDraftThreadKeyByLogicalProjectKey: {},
-      stickyModelSelectionByProvider: {},
-      stickyActiveProvider: null,
+      projectModelSelectionByProjectKey: {},
     });
   });
 
@@ -354,8 +351,7 @@ describe("composerDraftStore terminal contexts", () => {
       draftsByThreadKey: {},
       draftThreadsByThreadKey: {},
       logicalProjectDraftThreadKeyByLogicalProjectKey: {},
-      stickyModelSelectionByProvider: {},
-      stickyActiveProvider: null,
+      projectModelSelectionByProjectKey: {},
     });
   });
 
@@ -1195,31 +1191,14 @@ describe("composerDraftStore modelSelection", () => {
         fastMode: true,
       }),
     );
-    store.setStickyModelSelection(
-      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", {
-        effort: "max",
-        fastMode: true,
-      }),
-    );
-
     store.setProviderModelOptions(
       threadRef,
       CLAUDE_AGENT_DRIVER,
       toSelections({ thinking: false }),
-      {
-        persistSticky: true,
-      },
     );
 
     expect(
       draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
-    ).toEqual(
-      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", {
-        thinking: false,
-      }),
-    );
-    expect(
-      useComposerDraftStore.getState().stickyModelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
     ).toEqual(
       modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", {
         thinking: false,
@@ -1246,7 +1225,7 @@ describe("composerDraftStore modelSelection", () => {
         thinking: true,
       }),
     );
-    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider).toEqual({});
+    expect(useComposerDraftStore.getState().projectModelSelectionByProjectKey).toEqual({});
   });
 
   it("keeps explicit off/default codex overrides on the selection", () => {
@@ -1304,7 +1283,6 @@ describe("composerDraftStore modelSelection", () => {
 
     store.setProviderModelOptions(threadRef, CURSOR_DRIVER, toSelections({ reasoning: "high" }), {
       model: "gpt-5.4",
-      persistSticky: true,
     });
 
     expect(
@@ -1314,21 +1292,11 @@ describe("composerDraftStore modelSelection", () => {
         reasoning: "high",
       }),
     );
-    expect(
-      useComposerDraftStore.getState().stickyModelSelectionByProvider[CURSOR_INSTANCE],
-    ).toEqual(
-      modelSelection(CURSOR_DRIVER, "gpt-5.4", {
-        reasoning: "high",
-      }),
-    );
   });
 
-  it("updates only the draft when sticky persistence is omitted", () => {
+  it("updates only the draft when project persistence is omitted", () => {
     const store = useComposerDraftStore.getState();
 
-    store.setStickyModelSelection(
-      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { effort: "max" }),
-    );
     store.setModelSelection(
       threadRef,
       modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { effort: "max" }),
@@ -1347,9 +1315,7 @@ describe("composerDraftStore modelSelection", () => {
         thinking: false,
       }),
     );
-    expect(
-      useComposerDraftStore.getState().stickyModelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
-    ).toEqual(modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { effort: "max" }));
+    expect(useComposerDraftStore.getState().projectModelSelectionByProjectKey).toEqual({});
   });
 
   it("does not clear other provider options when setting options for a single provider", () => {
@@ -1403,91 +1369,6 @@ describe("composerDraftStore modelSelection", () => {
     );
     expect(draft?.activeProvider).toBe("claudeAgent");
   });
-
-  it("creates the first sticky snapshot from provider option changes", () => {
-    const store = useComposerDraftStore.getState();
-
-    store.setModelSelection(threadRef, modelSelection(CODEX_DRIVER, "gpt-5.4"));
-
-    store.setProviderModelOptions(threadRef, CODEX_DRIVER, toSelections({ fastMode: true }), {
-      persistSticky: true,
-    });
-
-    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_INSTANCE]).toEqual(
-      modelSelection(CODEX_DRIVER, "gpt-5.4", {
-        fastMode: true,
-      }),
-    );
-  });
-
-  it("stores provider option changes on a selected custom instance", () => {
-    const store = useComposerDraftStore.getState();
-
-    store.setProviderModelOptions(
-      threadRef,
-      CODEX_DRIVER,
-      toSelections({ reasoningEffort: "low" }),
-      {
-        instanceId: CODEX_SECONDARY_INSTANCE,
-        model: "gpt-5-codex",
-        persistSticky: true,
-      },
-    );
-
-    expect(
-      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CODEX_SECONDARY_INSTANCE],
-    ).toEqual(
-      expect.objectContaining({
-        instanceId: CODEX_SECONDARY_INSTANCE,
-        options: [{ id: "reasoningEffort", value: "low" }],
-      }),
-    );
-    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.activeProvider).toBe(CODEX_SECONDARY_INSTANCE);
-    expect(useComposerDraftStore.getState().stickyActiveProvider).toBe(CODEX_SECONDARY_INSTANCE);
-    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_INSTANCE]).toBe(
-      undefined,
-    );
-    expect(
-      useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_SECONDARY_INSTANCE],
-    ).toEqual(
-      expect.objectContaining({
-        instanceId: CODEX_SECONDARY_INSTANCE,
-        options: [{ id: "reasoningEffort", value: "low" }],
-      }),
-    );
-  });
-
-  it("updates only the draft when sticky persistence is disabled", () => {
-    const store = useComposerDraftStore.getState();
-
-    store.setStickyModelSelection(
-      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { effort: "max" }),
-    );
-    store.setModelSelection(
-      threadRef,
-      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { effort: "max" }),
-    );
-
-    store.setProviderModelOptions(
-      threadRef,
-      CLAUDE_AGENT_DRIVER,
-      toSelections({ thinking: false }),
-      {
-        persistSticky: false,
-      },
-    );
-
-    expect(
-      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
-    ).toEqual(
-      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", {
-        thinking: false,
-      }),
-    );
-    expect(
-      useComposerDraftStore.getState().stickyModelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
-    ).toEqual(modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { effort: "max" }));
-  });
 });
 
 describe("composerDraftStore setModelSelection", () => {
@@ -1509,73 +1390,214 @@ describe("composerDraftStore setModelSelection", () => {
   });
 });
 
-describe("composerDraftStore sticky composer settings", () => {
+describe("composerDraftStore project model selections", () => {
+  const projectA = scopeProjectRef(TEST_ENVIRONMENT_ID, ProjectId.make("project-a"));
+  const projectB = scopeProjectRef(TEST_ENVIRONMENT_ID, ProjectId.make("project-b"));
+  const projectAKey = scopedProjectKey(projectA);
+  const projectBKey = scopedProjectKey(projectB);
+  const draftA = DraftId.make("draft-project-a");
+  const draftB = DraftId.make("draft-project-b");
+
   beforeEach(() => {
     resetComposerDraftStore();
   });
 
-  it("stores a sticky model selection", () => {
+  it("stores independent model and reasoning selections per project", () => {
     const store = useComposerDraftStore.getState();
+    const selectionA = modelSelection(CODEX_DRIVER, "gpt-5.3-codex", {
+      reasoningEffort: "medium",
+      fastMode: true,
+    });
+    const selectionB = modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", {
+      effort: "max",
+    });
 
-    store.setStickyModelSelection(
-      modelSelection(CODEX_DRIVER, "gpt-5.3-codex", {
-        reasoningEffort: "medium",
-        fastMode: true,
-      }),
-    );
+    store.setProjectModelSelection(projectA, selectionA);
+    store.setProjectModelSelection(projectB, selectionB);
 
-    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_INSTANCE]).toEqual(
-      modelSelection(CODEX_DRIVER, "gpt-5.3-codex", {
-        reasoningEffort: "medium",
-        fastMode: true,
-      }),
-    );
-    expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("codex");
+    expect(useComposerDraftStore.getState().projectModelSelectionByProjectKey).toEqual({
+      [projectAKey]: selectionA,
+      [projectBKey]: selectionB,
+    });
   });
 
-  it("normalizes empty sticky model options by dropping selection options", () => {
+  it("applies only the selected project's model state to a new draft", () => {
     const store = useComposerDraftStore.getState();
+    const selectionA = modelSelection(CODEX_DRIVER, "gpt-5.3-codex", {
+      reasoningEffort: "medium",
+    });
+    const selectionB = modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", {
+      effort: "max",
+    });
+    store.setProjectModelSelection(projectA, selectionA);
+    store.setProjectModelSelection(projectB, selectionB);
+    store.setProjectDraftThreadId(projectA, draftA, {
+      threadId: ThreadId.make("thread-project-a"),
+    });
+    store.setProjectDraftThreadId(projectB, draftB, {
+      threadId: ThreadId.make("thread-project-b"),
+    });
 
-    store.setStickyModelSelection(modelSelection(CODEX_DRIVER, "gpt-5.4"));
+    store.applyProjectModelSelection(projectA, draftA);
+    store.applyProjectModelSelection(projectB, draftB);
 
-    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_INSTANCE]).toEqual(
-      modelSelection(CODEX_DRIVER, "gpt-5.4"),
-    );
-    expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("codex");
+    expect(draftByKey(draftA)).toMatchObject({
+      modelSelectionByProvider: { [CODEX_INSTANCE]: selectionA },
+      activeProvider: CODEX_INSTANCE,
+    });
+    expect(draftByKey(draftB)).toMatchObject({
+      modelSelectionByProvider: { [CLAUDE_AGENT_INSTANCE]: selectionB },
+      activeProvider: CLAUDE_AGENT_INSTANCE,
+    });
   });
 
-  it("drops empty cursor model options when normalizing sticky state", () => {
+  it("persists draft trait changes back to the owning project", () => {
     const store = useComposerDraftStore.getState();
+    const initial = modelSelection(CODEX_DRIVER, "gpt-5.4", {
+      reasoningEffort: "medium",
+    });
+    store.setProjectDraftThreadId(projectA, draftA, {
+      threadId: ThreadId.make("thread-project-traits"),
+    });
+    store.setModelSelection(draftA, initial);
+    store.setProjectModelSelection(projectA, initial);
 
-    store.setStickyModelSelection(
-      modelSelection(CURSOR_DRIVER, "gpt-5.4", {
-        reasoning: undefined,
-        fastMode: undefined,
-        thinking: undefined,
-        contextWindow: undefined,
+    store.setProviderModelOptions(
+      draftA,
+      CODEX_DRIVER,
+      toSelections({ reasoningEffort: "xhigh", fastMode: false }),
+      {
+        instanceId: CODEX_INSTANCE,
+        model: "gpt-5.4",
+        persistProjectSelection: true,
+      },
+    );
+
+    expect(useComposerDraftStore.getState().projectModelSelectionByProjectKey[projectAKey]).toEqual(
+      modelSelection(CODEX_DRIVER, "gpt-5.4", {
+        reasoningEffort: "xhigh",
+        fastMode: false,
       }),
     );
+  });
+
+  it("persists custom provider instance options per project", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectA, draftA, {
+      threadId: ThreadId.make("thread-project-custom-instance"),
+    });
+
+    store.setProviderModelOptions(draftA, CODEX_DRIVER, toSelections({ reasoningEffort: "low" }), {
+      instanceId: CODEX_SECONDARY_INSTANCE,
+      model: "gpt-5.3-codex",
+      persistProjectSelection: true,
+    });
 
     expect(
-      useComposerDraftStore.getState().stickyModelSelectionByProvider[CURSOR_INSTANCE],
-    ).toEqual(modelSelection(CURSOR_DRIVER, "gpt-5.4"));
-    expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("cursor");
+      useComposerDraftStore.getState().projectModelSelectionByProjectKey[projectAKey],
+    ).toMatchObject({
+      instanceId: CODEX_SECONDARY_INSTANCE,
+      model: "gpt-5.3-codex",
+      options: [{ id: "reasoningEffort", value: "low" }],
+    });
   });
 
-  it("applies sticky activeProvider to new drafts", () => {
+  it("does not change project preferences from an existing thread", () => {
     const store = useComposerDraftStore.getState();
-    const threadId = ThreadId.make("thread-sticky-active-provider");
-    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
-
-    store.setStickyModelSelection(modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6"));
-    store.applyStickyState(threadRef);
-
-    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
-      modelSelectionByProvider: {
-        claudeAgent: modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6"),
-      },
-      activeProvider: "claudeAgent",
+    const projectSelection = modelSelection(CODEX_DRIVER, "gpt-5.4", {
+      reasoningEffort: "medium",
     });
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("existing-thread"));
+    store.setProjectModelSelection(projectA, projectSelection);
+
+    store.setProviderModelOptions(
+      threadRef,
+      CODEX_DRIVER,
+      toSelections({ reasoningEffort: "xhigh" }),
+      {
+        instanceId: CODEX_INSTANCE,
+        model: "gpt-5.4",
+        persistProjectSelection: true,
+      },
+    );
+
+    expect(useComposerDraftStore.getState().projectModelSelectionByProjectKey[projectAKey]).toEqual(
+      projectSelection,
+    );
+  });
+
+  it("retains the project preference after draft promotion", () => {
+    const store = useComposerDraftStore.getState();
+    const selection = modelSelection(CURSOR_DRIVER, "gpt-5.4", {
+      reasoning: "high",
+    });
+    store.setProjectDraftThreadId(projectA, draftA, {
+      threadId: ThreadId.make("thread-promoted-project"),
+    });
+    store.setProjectModelSelection(projectA, selection);
+    store.markDraftThreadPromoting(draftA);
+    store.finalizePromotedDraftThread(draftA);
+
+    expect(useComposerDraftStore.getState().projectModelSelectionByProjectKey[projectAKey]).toEqual(
+      selection,
+    );
+  });
+
+  it("round-trips project model selections through persisted storage", () => {
+    const selection = modelSelection(CODEX_DRIVER, "gpt-5.3-codex", {
+      reasoningEffort: "xhigh",
+    });
+    useComposerDraftStore.getState().setProjectModelSelection(projectA, selection);
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => unknown;
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+
+    const persisted = persistApi.getOptions().partialize(useComposerDraftStore.getState());
+    const merged = persistApi
+      .getOptions()
+      .merge(persisted, useComposerDraftStore.getInitialState());
+
+    expect(merged.projectModelSelectionByProjectKey[projectAKey]).toEqual(selection);
+  });
+
+  it("migrates the old global selection onto projects with active drafts", () => {
+    const store = useComposerDraftStore.getState();
+    const legacySelection = modelSelection(CODEX_DRIVER, "gpt-5.4", {
+      reasoningEffort: "medium",
+    });
+    store.setProjectDraftThreadId(projectA, draftA, {
+      threadId: ThreadId.make("thread-legacy-project"),
+    });
+    const draftThread = useComposerDraftStore.getState().draftThreadsByThreadKey[draftA]!;
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+
+    const merged = persistApi.getOptions().merge(
+      {
+        draftsByThreadKey: {},
+        draftThreadsByThreadKey: { [draftA]: draftThread },
+        logicalProjectDraftThreadKeyByLogicalProjectKey: {
+          [scopedProjectKey(projectA)]: draftA,
+        },
+        stickyModelSelectionByProvider: { [CODEX_INSTANCE]: legacySelection },
+        stickyActiveProvider: CODEX_INSTANCE,
+      },
+      useComposerDraftStore.getInitialState(),
+    );
+
+    expect(merged.projectModelSelectionByProjectKey[projectAKey]).toEqual(legacySelection);
   });
 });
 

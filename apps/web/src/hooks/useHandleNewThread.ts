@@ -58,12 +58,15 @@ export function useNewThreadHandler() {
         getDraftSessionByLogicalProjectKey,
         getDraftSession,
         getDraftThread,
-        applyStickyState,
+        projectModelSelectionByProjectKey,
+        applyProjectModelSelection,
         setDraftThreadContext,
         setLogicalProjectDraftThreadId,
         setModelSelection,
       } = useComposerDraftStore.getState();
       const currentRouteTarget = getCurrentRouteTarget();
+      const projectModelSelection =
+        projectModelSelectionByProjectKey[scopedProjectKey(projectRef)] ?? null;
       // A new thread carries the user's *working mode* from the thread being
       // viewed: model (including options like reasoning effort and context
       // window), permission mode, and interaction mode. Branch, worktree, and
@@ -171,11 +174,12 @@ export function useNewThreadHandler() {
               ...(carryRuntimeMode ? { runtimeMode: carryRuntimeMode } : {}),
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             });
-            if (carryModelSelection) {
-              // The carried selection is a complete snapshot of the viewed
-              // thread's model state: absent options mean "no options", not
-              // "keep the stale draft's options".
-              setModelSelection(reusableStoredDraftThread.draftId, carryModelSelection, {
+            const nextModelSelection = projectModelSelection ?? carryModelSelection;
+            if (nextModelSelection) {
+              // The target project's persisted selection wins. If it has no
+              // preference yet, preserve main's behavior of carrying the
+              // viewed thread's complete model snapshot.
+              setModelSelection(reusableStoredDraftThread.draftId, nextModelSelection, {
                 replaceOptions: true,
               });
             }
@@ -262,13 +266,10 @@ export function useNewThreadHandler() {
           runtimeMode: carryRuntimeMode ?? DEFAULT_RUNTIME_MODE,
           ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
         });
-        applyStickyState(draftId);
-        if (carryModelSelection) {
-          // After sticky state so the viewed thread's exact selection
-          // (model + options like effort and context window) wins over the
-          // globally sticky one. replaceOptions: the carried selection is a
-          // complete snapshot — absent options mean "no options", not "keep
-          // whatever sticky state just wrote".
+        applyProjectModelSelection(projectRef, draftId);
+        if (!projectModelSelection && carryModelSelection) {
+          // Projects without a persisted preference retain main's carry-over
+          // behavior for the viewed thread's complete model snapshot.
           setModelSelection(draftId, carryModelSelection, { replaceOptions: true });
         }
 

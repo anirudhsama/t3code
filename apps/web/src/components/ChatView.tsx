@@ -1183,8 +1183,8 @@ function ChatViewContent(props: ChatViewProps) {
   // settings UI never writes to remote environments), so read them from the
   // primary server rather than the thread's environment.
   const primaryServerSettings = useAtomValue(primaryServerSettingsAtom);
-  const setStickyComposerModelSelection = useComposerDraftStore(
-    (store) => store.setStickyModelSelection,
+  const setProjectComposerModelSelection = useComposerDraftStore(
+    (store) => store.setProjectModelSelection,
   );
   const timestampFormat = settings.timestampFormat;
   const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
@@ -1225,6 +1225,9 @@ function ChatViewContent(props: ChatViewProps) {
   const getDraftSession = useComposerDraftStore((store) => store.getDraftSession);
   const setLogicalProjectDraftThreadId = useComposerDraftStore(
     (store) => store.setLogicalProjectDraftThreadId,
+  );
+  const applyProjectModelSelection = useComposerDraftStore(
+    (store) => store.applyProjectModelSelection,
   );
   const draftThread = useComposerDraftStore((store) =>
     routeKind === "server"
@@ -1744,6 +1747,7 @@ function ChatViewContent(props: ChatViewProps) {
         interactionMode: DEFAULT_INTERACTION_MODE,
         ...input,
       });
+      applyProjectModelSelection(activeProjectRef, nextDraftId);
       await navigate({
         to: "/draft/$draftId",
         params: buildDraftThreadRouteParams(nextDraftId),
@@ -1752,6 +1756,7 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [
       activeProject,
+      applyProjectModelSelection,
       draftId,
       getDraftSession,
       getDraftSessionByLogicalProjectKey,
@@ -5412,19 +5417,24 @@ function ChatViewContent(props: ChatViewProps) {
         scheduleComposerFocus();
         return;
       }
-      setComposerDraftModelSelection(
-        scopeThreadRef(activeThread.environmentId, activeThread.id),
-        nextModelSelection,
-      );
-      setStickyComposerModelSelection(nextModelSelection);
+      setComposerDraftModelSelection(composerDraftTarget, nextModelSelection);
+      if (routeKind === "draft" && activeProject) {
+        setProjectComposerModelSelection(
+          scopeProjectRef(activeProject.environmentId, activeProject.id),
+          nextModelSelection,
+        );
+      }
       scheduleComposerFocus();
     },
     [
       activeThread,
+      activeProject,
+      composerDraftTarget,
       lockedProvider,
+      routeKind,
       scheduleComposerFocus,
       setComposerDraftModelSelection,
-      setStickyComposerModelSelection,
+      setProjectComposerModelSelection,
       providerStatuses,
       settings,
     ],
