@@ -342,6 +342,38 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
   "ProviderRegistry",
   (it) => {
     describe("checkCodexProviderStatus", () => {
+      it.effect.fails("returns the skill catalog for the thread cwd instead of startup cwd", () =>
+        Effect.gen(function* () {
+          const startupCwd = process.cwd();
+          const threadCwd = "/workspace/thread-project";
+
+          const status = yield* checkCodexProviderStatus(defaultCodexSettings, (input) =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                skills: [
+                  input.cwd === threadCwd
+                    ? {
+                        name: "thread-skill",
+                        path: `${threadCwd}/.agents/skills/thread-skill/SKILL.md`,
+                        enabled: true,
+                      }
+                    : {
+                        name: "startup-skill",
+                        path: `${startupCwd}/.agents/skills/startup-skill/SKILL.md`,
+                        enabled: true,
+                      },
+                ],
+              }),
+            ),
+          );
+
+          assert.deepStrictEqual(
+            status.skills.map((skill) => skill.name),
+            ["thread-skill"],
+          );
+        }),
+      );
+
       it.effect("uses the app-server account and model list for provider status", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
