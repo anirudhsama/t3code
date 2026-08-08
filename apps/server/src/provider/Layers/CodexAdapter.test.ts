@@ -8,6 +8,7 @@ import {
   CodexSettings,
   EventId,
   ProviderDriverKind,
+  ProviderExtensionItemId,
   ProviderInstanceId,
   ProviderItemId,
   type ProviderApprovalDecision,
@@ -37,7 +38,11 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { type ProviderAdapterError, ProviderAdapterValidationError } from "../Errors.ts";
+import {
+  type ProviderAdapterError,
+  ProviderAdapterStaleSkillSelectionError,
+  ProviderAdapterValidationError,
+} from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import type { ProviderExtensionsShape } from "../Services/ThreadExtensions.ts";
@@ -50,6 +55,7 @@ import {
 } from "./CodexSessionRuntime.ts";
 import {
   CODEX_EXTENSION_CAPABILITIES,
+  compileCodexExtensionConfig,
   makeCodexAdapter,
   parseCodexMcpDefinitions,
 } from "./CodexAdapter.ts";
@@ -173,7 +179,14 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Effect.promise(() => this.readMcpConfigImpl(cwd));
   }
 
-  listMcpServerStatus = Effect.promise(() => this.listMcpServerStatusImpl());
+  listMcpServerStatus = Effect.tryPromise({
+    try: () => this.listMcpServerStatusImpl(),
+    catch: (cause) =>
+      new CodexErrors.CodexAppServerTransportError({
+        operation: "read-input-stream",
+        cause,
+      }),
+  });
 
   beginMcpAuth(name: string) {
     return Effect.promise(() => this.beginMcpAuthImpl(name));
@@ -225,6 +238,7 @@ function makeRuntimeFactory(configure?: (runtime: FakeCodexRuntime) => void) {
 
   return {
     factory,
+    runtimes,
     get lastRuntime(): FakeCodexRuntime | undefined {
       return runtimes.at(-1);
     },
@@ -1316,6 +1330,273 @@ function withExtensionsTestAdapter<A>(
     Effect.scoped,
   );
 }
+
+it("compiles sparse Codex overrides and drops the managed t3-code MCP override", () => {
+  NodeAssert.deepStrictEqual(
+    compileCodexExtensionConfig({
+      skillOverrides: {
+        [ProviderExtensionItemId.make("/workspace/.agents/skills/review/SKILL.md")]: "disabled",
+      },
+      mcpOverrides: {
+        [ProviderExtensionItemId.make("postgres")]: "enabled",
+        [ProviderExtensionItemId.make("t3-code")]: "disabled",
+      },
+    }),
+    {
+      skills: {
+        config: [
+          {
+            path: "/workspace/.agents/skills/review/SKILL.md",
+            enabled: false,
+          },
+        ],
+      },
+      mcp_servers: {
+        postgres: { enabled: true },
+      },
+    },
+  );
+});
+
+it.effect("records overrides without starting a runtime when no session is active", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const result = yield* adapter.extensions.reconcileOverrides!({
+        threadId: asThreadId("thread-stopped"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        skillOverrides: {},
+        mcpOverrides: { [ProviderExtensionItemId.make("postgres")]: "disabled" },
+        extensionOverridesRevision: 3,
+      });
+
+      NodeAssert.equal(runtimeFactory.runtimes.length, 0);
+      NodeAssert.equal(result.state.appliedOverrideRevision, 3);
+      NodeAssert.equal(result.session, undefined);
+    }),
+  );
+});
+
+it.effect("keeps sibling override state isolated while restart-resuming one idle thread", () => {
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtime.startImpl.mockImplementation((input) =>
+      Promise.resolve({
+        provider: ProviderDriverKind.make("codex"),
+        status: "ready",
+        runtimeMode: input?.runtimeMode ?? runtime.options.runtimeMode,
+        threadId: runtime.options.threadId,
+        cwd: input?.cwd ?? runtime.options.cwd,
+        resumeCursor: {
+          threadId: `provider-${runtime.options.threadId}`,
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+  });
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const skillId = ProviderExtensionItemId.make("/workspace/.agents/skills/review/SKILL.md");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-a"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        extensionOverrides: {
+          skills: { [skillId]: "disabled" },
+          mcp: { [ProviderExtensionItemId.make("postgres")]: "disabled" },
+          revision: 1,
+        },
+      });
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-b"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        extensionOverrides: {
+          skills: { [skillId]: "enabled" },
+          mcp: { [ProviderExtensionItemId.make("postgres")]: "enabled" },
+          revision: 1,
+        },
+      });
+
+      const originalA = runtimeFactory.runtimes[0]!;
+      const siblingB = runtimeFactory.runtimes[1]!;
+      const result = yield* adapter.extensions.reconcileOverrides!({
+        threadId: asThreadId("thread-a"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        skillOverrides: { [skillId]: "enabled" },
+        mcpOverrides: { [ProviderExtensionItemId.make("postgres")]: "enabled" },
+        extensionOverridesRevision: 2,
+      });
+
+      NodeAssert.equal(runtimeFactory.runtimes.length, 3);
+      NodeAssert.equal(originalA.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(siblingB.closeImpl.mock.calls.length, 0);
+      NodeAssert.deepStrictEqual(runtimeFactory.runtimes[2]!.options.resumeCursor, {
+        threadId: "provider-thread-a",
+      });
+      NodeAssert.deepStrictEqual(runtimeFactory.runtimes[2]!.options.config, {
+        skills: { config: [{ path: skillId, enabled: true }] },
+        mcp_servers: { postgres: { enabled: true } },
+      });
+      NodeAssert.equal(result.state.appliedOverrideRevision, 2);
+      NodeAssert.equal(
+        (yield* adapter.extensions.reconciliationState!(asThreadId("thread-b")))
+          .appliedOverrideRevision,
+        1,
+      );
+    }),
+  );
+});
+
+it.effect("retains pending desired state and a retryable error when reconciliation fails", () => {
+  let runtimeIndex = 0;
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtimeIndex += 1;
+    runtime.startImpl.mockImplementation((input) =>
+      Promise.resolve({
+        provider: ProviderDriverKind.make("codex"),
+        status: "ready",
+        runtimeMode: input?.runtimeMode ?? runtime.options.runtimeMode,
+        threadId: runtime.options.threadId,
+        cwd: input?.cwd ?? runtime.options.cwd,
+        resumeCursor: { threadId: "provider-thread-failure" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    if (runtimeIndex === 2) {
+      runtime.listMcpServerStatusImpl.mockRejectedValue(new Error("confirmation failed"));
+    }
+  });
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-failure"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        extensionOverrides: { skills: {}, mcp: {}, revision: 1 },
+      });
+      const result = yield* adapter.extensions.reconcileOverrides!({
+        threadId: asThreadId("thread-failure"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        skillOverrides: {},
+        mcpOverrides: { [ProviderExtensionItemId.make("postgres")]: "disabled" },
+        extensionOverridesRevision: 2,
+      }).pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Failure");
+      const state = yield* adapter.extensions.reconciliationState!(asThreadId("thread-failure"));
+      NodeAssert.equal(state.appliedOverrideRevision, 1);
+      NodeAssert.equal(state.pendingOverrideRevision, 2);
+      NodeAssert.equal(state.error?.retryable, true);
+      NodeAssert.match(state.error?.message ?? "", /confirmation failed/);
+    }),
+  );
+});
+
+it.effect("dispatches exact selected skills and rejects stale or disabled selections", () => {
+  const skillPath = "/workspace/.agents/skills/review/SKILL.md";
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtime.listSkillsImpl.mockImplementation((input) =>
+      Promise.resolve({
+        data: [
+          {
+            cwd: input.cwd,
+            errors: [],
+            skills: [
+              {
+                name: "review",
+                path: skillPath,
+                enabled: true,
+                description: "Review changes",
+                scope: "repo",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+  });
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const skillId = ProviderExtensionItemId.make(skillPath);
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-skills"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        extensionOverrides: { skills: {}, mcp: {}, revision: 0 },
+      });
+      const runtime = runtimeFactory.lastRuntime!;
+      yield* adapter.sendTurn({
+        threadId: asThreadId("thread-skills"),
+        input: "Review this",
+        selectedSkills: [{ id: skillId, name: "review", path: skillPath }],
+      });
+      NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0]?.selectedSkills, [
+        { name: "review", path: skillPath },
+      ]);
+
+      yield* adapter.extensions.reconcileOverrides!({
+        threadId: asThreadId("thread-skills"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        skillOverrides: { [skillId]: "disabled" },
+        mcpOverrides: {},
+        extensionOverridesRevision: 1,
+        defer: true,
+      });
+      const disabled = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("thread-skills"),
+          input: "Review again",
+          selectedSkills: [{ id: skillId, name: "review", path: skillPath }],
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(disabled._tag, "Failure");
+      NodeAssert.ok(
+        disabled._tag === "Failure" &&
+          Schema.is(ProviderAdapterStaleSkillSelectionError)(disabled.failure),
+      );
+      if (
+        disabled._tag === "Failure" &&
+        disabled.failure._tag === "ProviderAdapterStaleSkillSelectionError"
+      ) {
+        NodeAssert.equal(disabled.failure.reason, "disabled");
+      }
+
+      const stale = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("thread-skills"),
+          input: "Wrong identity",
+          selectedSkills: [
+            {
+              id: ProviderExtensionItemId.make("/other/review/SKILL.md"),
+              name: "review",
+              path: "/other/review/SKILL.md",
+            },
+          ],
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(stale._tag, "Failure");
+      if (
+        stale._tag === "Failure" &&
+        stale.failure._tag === "ProviderAdapterStaleSkillSelectionError"
+      ) {
+        NodeAssert.equal(stale.failure.reason, "missing");
+      }
+    }),
+  );
+});
 
 it.effect("returns cwd-specific and global skills without collapsing duplicate names", () => {
   const runtimeFactory = makeRuntimeFactory((runtime) => {

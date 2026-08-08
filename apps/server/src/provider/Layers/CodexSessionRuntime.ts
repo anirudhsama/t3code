@@ -105,6 +105,7 @@ export interface CodexSessionRuntimeOptions {
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
+  readonly config?: Readonly<Record<string, unknown>>;
   readonly appServerArgs?: ReadonlyArray<string>;
 }
 
@@ -118,6 +119,10 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | undefined;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly selectedSkills?: ReadonlyArray<{
+    readonly name: string;
+    readonly path: string;
+  }>;
 }
 
 export interface CodexSessionRuntimeStartInput {
@@ -126,6 +131,7 @@ export interface CodexSessionRuntimeStartInput {
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
+  readonly config?: Readonly<Record<string, unknown>>;
 }
 
 export interface CodexThreadTurnSnapshot {
@@ -327,6 +333,7 @@ function buildThreadStartParams(input: {
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
+  readonly config: Readonly<Record<string, unknown>> | undefined;
 }): EffectCodexSchema.V2ThreadStartParams {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   return {
@@ -336,6 +343,7 @@ function buildThreadStartParams(input: {
     approvalsReviewer: config.approvalsReviewer,
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+    ...(input.config ? { config: input.config } : {}),
   };
 }
 
@@ -395,6 +403,10 @@ export function buildTurnStartParams(input: {
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly selectedSkills?: ReadonlyArray<{
+    readonly name: string;
+    readonly path: string;
+  }>;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -408,6 +420,9 @@ export function buildTurnStartParams(input: {
   }
   for (const attachment of input.attachments ?? []) {
     turnInput.push(attachment);
+  }
+  for (const skill of input.selectedSkills ?? []) {
+    turnInput.push({ type: "skill", name: skill.name, path: skill.path });
   }
 
   const config = runtimeModeToThreadConfig(input.runtimeMode);
@@ -524,6 +539,7 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  readonly config?: Readonly<Record<string, unknown>>;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -531,6 +547,7 @@ export const openCodexThread = (input: {
     runtimeMode: input.runtimeMode,
     model: input.requestedModel,
     serviceTier: input.serviceTier,
+    config: input.config,
   });
 
   if (resumeThreadId === undefined) {
@@ -1761,6 +1778,7 @@ export const makeCodexSessionRuntime = (
       const requestedModel = normalizeCodexModelSlug(startInput?.model ?? options.model);
       const serviceTier = startInput?.serviceTier ?? options.serviceTier;
       const resumeCursor = startInput?.resumeCursor ?? options.resumeCursor;
+      const config = startInput?.config ?? options.config;
 
       const opened = yield* openCodexThread({
         client,
@@ -1770,6 +1788,7 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier,
         resumeThreadId: readResumeCursorThreadId(resumeCursor),
+        ...(config ? { config } : {}),
       });
 
       const providerThreadId = opened.thread.id;
@@ -1878,6 +1897,7 @@ export const makeCodexSessionRuntime = (
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+            ...(input.selectedSkills ? { selectedSkills: input.selectedSkills } : {}),
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(

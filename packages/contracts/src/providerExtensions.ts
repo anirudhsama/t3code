@@ -26,6 +26,13 @@ export const ProviderMcpOverrides = Schema.Record(
 );
 export type ProviderMcpOverrides = typeof ProviderMcpOverrides.Type;
 
+export const ProviderThreadExtensionOverrides = Schema.Struct({
+  skills: ProviderSkillOverrides,
+  mcp: ProviderMcpOverrides,
+  revision: NonNegativeInt,
+});
+export type ProviderThreadExtensionOverrides = typeof ProviderThreadExtensionOverrides.Type;
+
 export const ProviderSelectedSkill = Schema.Struct({
   id: ProviderExtensionItemId,
   name: TrimmedNonEmptyString,

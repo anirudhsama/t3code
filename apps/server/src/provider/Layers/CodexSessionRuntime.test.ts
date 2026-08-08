@@ -245,6 +245,31 @@ describe("buildTurnStartParams", () => {
       ],
     });
   });
+
+  it("encodes selected skills as structured app-server input", () => {
+    const params = Effect.runSync(
+      buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "Review this",
+        selectedSkills: [
+          {
+            name: "review",
+            path: "/workspace/.agents/skills/review/SKILL.md",
+          },
+        ],
+      }),
+    );
+
+    NodeAssert.deepStrictEqual(params.input, [
+      { type: "text", text: "Review this" },
+      {
+        type: "skill",
+        name: "review",
+        path: "/workspace/.agents/skills/review/SKILL.md",
+      },
+    ]);
+  });
 });
 
 describe("buildCodexDeveloperInstructions", () => {
@@ -394,6 +419,58 @@ describe("isRecoverableThreadResumeError", () => {
 });
 
 describe("openCodexThread", () => {
+  it.effect("passes extension config to both thread start and resume", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const client = {
+        request: <M extends "thread/start" | "thread/resume">(
+          method: M,
+          payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          calls.push({ method, payload });
+          return Effect.succeed(
+            makeThreadOpenResponse(method === "thread/start" ? "new-thread" : "resumed-thread"),
+          ) as Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M]>;
+        },
+      };
+      const config = {
+        skills: {
+          config: [{ path: "/skills/review/SKILL.md", enabled: false }],
+        },
+        mcp_servers: { postgres: { enabled: true } },
+      };
+
+      yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-start"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        config,
+      });
+      yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-resume"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "persisted-thread",
+        config,
+      });
+
+      NodeAssert.deepStrictEqual(
+        calls.map((call) => [call.method, (call.payload as { config?: unknown }).config]),
+        [
+          ["thread/start", config],
+          ["thread/resume", config],
+        ],
+      );
+    }),
+  );
+
   it.effect("falls back to thread/start when resume fails recoverably", () =>
     Effect.gen(function* () {
       const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];

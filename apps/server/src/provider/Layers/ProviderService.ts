@@ -45,7 +45,11 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
-import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
+import {
+  type ProviderAdapterError,
+  ProviderUnsupportedError,
+  ProviderValidationError,
+} from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
@@ -993,6 +997,35 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getInstanceInfo: ProviderServiceMethod<"getInstanceInfo"> = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
+  const reconcileExtensions: NonNullable<ProviderServiceMethod<"reconcileExtensions">> = Effect.fn(
+    "ProviderService.reconcileExtensions",
+  )(function* (input) {
+    const { providerInstanceId, ...reconciliationInput } = input;
+    const adapter = yield* registry.getByInstance(providerInstanceId);
+    const reconcile = adapter.extensions?.reconcileOverrides;
+    if (!reconcile) {
+      return yield* new ProviderUnsupportedError({ provider: adapter.provider });
+    }
+    const result = yield* reconcile(reconciliationInput);
+    if (result.session) {
+      yield* upsertSessionBinding({ ...result.session, providerInstanceId }, input.threadId, {
+        modelSelection: input.modelSelection,
+      });
+    }
+    return result;
+  });
+
+  const getExtensionReconciliationState: NonNullable<
+    ProviderServiceMethod<"getExtensionReconciliationState">
+  > = Effect.fn("ProviderService.getExtensionReconciliationState")(function* (input) {
+    const adapter = yield* registry.getByInstance(input.providerInstanceId);
+    const readState = adapter.extensions?.reconciliationState;
+    if (!readState) {
+      return yield* new ProviderUnsupportedError({ provider: adapter.provider });
+    }
+    return yield* readState(input.threadId);
+  });
+
   const rollbackConversation: ProviderServiceMethod<"rollbackConversation"> = Effect.fn(
     "rollbackConversation",
   )(function* (rawInput) {
@@ -1104,6 +1137,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     listSessions,
     getCapabilities,
     getInstanceInfo,
+    reconcileExtensions,
+    getExtensionReconciliationState,
     rollbackConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each

@@ -15,6 +15,8 @@ import {
   ProviderExtensionItemId,
   type ProviderExtensionOrigin,
   type ProviderExtensionScope,
+  type ProviderMcpOverrides,
+  type ProviderSkillOverrides,
   ProviderDriverKind,
   type ProviderEvent,
   ProviderInstanceId,
@@ -53,6 +55,7 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterStaleSkillSelectionError,
   ProviderAdapterProcessError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
@@ -64,6 +67,8 @@ import type {
   ProviderExtensionInventoryResult,
   ProviderExtensionManagementEvent,
   ProviderExtensionMcpFacet,
+  ProviderExtensionReconciliationInput,
+  ProviderExtensionReconciliationState,
   ProviderExtensionRuntimeContext,
   ProviderExtensionsShape,
   ProviderMcpInventoryItem,
@@ -91,6 +96,28 @@ const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 const MANAGED_T3_MCP_SERVER_ID = ProviderExtensionItemId.make("t3-code");
+
+export function compileCodexExtensionConfig(input: {
+  readonly skillOverrides: ProviderSkillOverrides;
+  readonly mcpOverrides: ProviderMcpOverrides;
+}): Readonly<Record<string, unknown>> | undefined {
+  const skills = Object.entries(input.skillOverrides).map(([path, state]) => ({
+    path,
+    enabled: state === "enabled",
+  }));
+  const mcpServers = Object.fromEntries(
+    Object.entries(input.mcpOverrides)
+      .filter(([name]) => name !== MANAGED_T3_MCP_SERVER_ID)
+      .map(([name, state]) => [name, { enabled: state === "enabled" }]),
+  );
+  if (skills.length === 0 && Object.keys(mcpServers).length === 0) {
+    return undefined;
+  }
+  return {
+    ...(skills.length > 0 ? { skills: { config: skills } } : {}),
+    ...(Object.keys(mcpServers).length > 0 ? { mcp_servers: mcpServers } : {}),
+  };
+}
 
 export const CODEX_EXTENSION_CAPABILITIES = {
   skills: {
@@ -1969,12 +1996,32 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const mcpStatusCache = makeCodexInventoryCacheState<readonly [string, CodexMcpLiveStatus]>();
   const mcpNotificationStatus = new Map<ThreadId, Map<string, Partial<CodexMcpLiveStatus>>>();
   const mcpNotificationRevision = new Map<ThreadId, number>();
+  const desiredExtensionOverrides = new Map<ThreadId, ProviderExtensionReconciliationInput>();
+  const extensionReconciliationStates = new Map<ThreadId, ProviderExtensionReconciliationState>();
   let nextInventoryRequestId = 0;
   let inventoryRevision = 0;
 
   const cacheKey = (cwd: string) => `${boundInstanceId}\u0000${cwd}`;
   const canonicalizeCwd = (cwd: string) =>
     fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => cwd));
+
+  const reconciliationState = (threadId: ThreadId): ProviderExtensionReconciliationState =>
+    extensionReconciliationStates.get(threadId) ?? { appliedOverrideRevision: 0 };
+
+  const publishReconciliationState = Effect.fnUntraced(function* (
+    input: ProviderExtensionReconciliationInput,
+    state: ProviderExtensionReconciliationState,
+  ) {
+    desiredExtensionOverrides.set(input.threadId, input);
+    extensionReconciliationStates.set(input.threadId, state);
+    yield* PubSub.publish(extensionEvents, {
+      type: "overrides.reconciliation.changed",
+      threadId: input.threadId,
+      cwd: input.cwd,
+      state,
+    });
+    return state;
+  });
 
   const readCachedInventory = <Item>(input: {
     readonly state: CodexInventoryCacheState<Item>;
@@ -2052,6 +2099,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
     const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+    const extensionConfig = input.extensionOverrides
+      ? compileCodexExtensionConfig({
+          skillOverrides: input.extensionOverrides.skills,
+          mcpOverrides: input.extensionOverrides.mcp,
+        })
+      : undefined;
     return {
       threadId: input.threadId,
       providerInstanceId: boundInstanceId,
@@ -2068,6 +2121,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ? { model: input.modelSelection.model }
         : {}),
       ...(serviceTier ? { serviceTier } : {}),
+      ...(extensionConfig ? { config: extensionConfig } : {}),
       ...(mcpSession
         ? {
             environment: {
@@ -2195,6 +2249,24 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         input.modelSelection?.instanceId === boundInstanceId
           ? getCodexServiceTierOptionValue(input.modelSelection)
           : undefined;
+      const extensionConfig = input.extensionOverrides
+        ? compileCodexExtensionConfig({
+            skillOverrides: input.extensionOverrides.skills,
+            mcpOverrides: input.extensionOverrides.mcp,
+          })
+        : undefined;
+      const extensionInput = input.extensionOverrides
+        ? ({
+            threadId: input.threadId,
+            cwd,
+            runtimeMode: input.runtimeMode,
+            ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
+            ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+            skillOverrides: input.extensionOverrides.skills,
+            mcpOverrides: input.extensionOverrides.mcp,
+            extensionOverridesRevision: input.extensionOverrides.revision,
+          } satisfies ProviderExtensionReconciliationInput)
+        : undefined;
       const startInput: CodexSessionRuntimeStartInput = {
         cwd,
         runtimeMode: input.runtimeMode,
@@ -2205,7 +2277,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(isCodexResumeCursorSchema(input.resumeCursor)
           ? { resumeCursor: input.resumeCursor }
           : {}),
+        ...(extensionConfig ? { config: extensionConfig } : {}),
       };
+      if (extensionInput) {
+        const current = reconciliationState(input.threadId);
+        yield* publishReconciliationState(extensionInput, {
+          appliedOverrideRevision: current.appliedOverrideRevision,
+          pendingOverrideRevision: extensionInput.extensionOverridesRevision,
+        });
+      }
       const started = yield* context.runtime
         .start(reusePreparedRuntime ? startInput : undefined)
         .pipe(
@@ -2218,8 +2298,44 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 cause,
               }),
           ),
+          Effect.tapError((error) =>
+            extensionInput
+              ? publishReconciliationState(extensionInput, {
+                  appliedOverrideRevision: reconciliationState(input.threadId)
+                    .appliedOverrideRevision,
+                  pendingOverrideRevision: extensionInput.extensionOverridesRevision,
+                  error: {
+                    domain: "all",
+                    message: error.message,
+                    retryable: true,
+                  },
+                }).pipe(Effect.ignore)
+              : Effect.void,
+          ),
           Effect.onError(() => stopSessionInternal(context).pipe(Effect.ignore)),
         );
+      if (extensionInput) {
+        yield* context.runtime.listMcpServerStatus.pipe(
+          Effect.tapError((cause) =>
+            publishReconciliationState(extensionInput, {
+              appliedOverrideRevision: reconciliationState(input.threadId).appliedOverrideRevision,
+              pendingOverrideRevision: extensionInput.extensionOverridesRevision,
+              error: {
+                domain: "all",
+                message: cause.cause instanceof Error ? cause.cause.message : cause.message,
+                retryable: true,
+              },
+            }).pipe(Effect.ignore),
+          ),
+          Effect.mapError((cause) =>
+            mapCodexRuntimeError(input.threadId, "mcpServerStatus/list", cause),
+          ),
+          Effect.onError(() => stopSessionInternal(context).pipe(Effect.ignore)),
+        );
+        yield* publishReconciliationState(extensionInput, {
+          appliedOverrideRevision: extensionInput.extensionOverridesRevision,
+        });
+      }
       context.started = true;
       mcpStatusCache.cache.delete(input.threadId);
       return started;
@@ -2502,6 +2618,65 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     };
   });
 
+  const validateSelectedSkills = Effect.fn("CodexAdapter.validateSelectedSkills")(function* (
+    input: ProviderSendTurnInput,
+    session: CodexAdapterSessionContext,
+  ) {
+    if (!input.selectedSkills || input.selectedSkills.length === 0) {
+      return [];
+    }
+    const inventory = yield* readSkillInventory({
+      threadId: input.threadId,
+      cwd: session.cwd,
+      forceReload: true,
+    });
+    const desired = desiredExtensionOverrides.get(input.threadId);
+    return yield* Effect.forEach(input.selectedSkills, (selected) => {
+      const skill = inventory.items.find((candidate) => candidate.id === selected.id);
+      if (!skill) {
+        return Effect.fail(
+          new ProviderAdapterStaleSkillSelectionError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+            skillId: selected.id,
+            skillName: selected.name,
+            reason: "missing",
+          }),
+        );
+      }
+      if (
+        skill.name !== selected.name ||
+        !skill.path ||
+        (selected.path !== undefined && selected.path !== skill.path)
+      ) {
+        return Effect.fail(
+          new ProviderAdapterStaleSkillSelectionError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+            skillId: selected.id,
+            skillName: selected.name,
+            reason: "identity-mismatch",
+          }),
+        );
+      }
+      const override = desired?.skillOverrides[selected.id];
+      const effectiveEnabled =
+        override === "enabled" || (override === undefined && skill.providerEnabled);
+      if (!effectiveEnabled) {
+        return Effect.fail(
+          new ProviderAdapterStaleSkillSelectionError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+            skillId: selected.id,
+            skillName: selected.name,
+            reason: "disabled",
+          }),
+        );
+      }
+      return Effect.succeed({ name: skill.name, path: skill.path });
+    });
+  });
+
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     const codexAttachments = yield* Effect.forEach(
       input.attachments ?? [],
@@ -2510,6 +2685,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
 
     const session = yield* requireSession(input.threadId);
+    const selectedSkills = yield* validateSelectedSkills(input, session);
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
@@ -2532,6 +2708,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(serviceTier ? { serviceTier } : {}),
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+        ...(selectedSkills.length > 0 ? { selectedSkills } : {}),
       })
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
   });
@@ -2643,6 +2820,73 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
   });
 
+  const reconcileOverrides: NonNullable<ProviderExtensionsShape["reconcileOverrides"]> = Effect.fn(
+    "CodexAdapter.reconcileOverrides",
+  )(function* (input) {
+    const current = reconciliationState(input.threadId);
+    if (
+      input.extensionOverridesRevision === current.appliedOverrideRevision &&
+      current.pendingOverrideRevision === undefined &&
+      current.error === undefined
+    ) {
+      return { state: current };
+    }
+
+    const pendingState = yield* publishReconciliationState(input, {
+      appliedOverrideRevision: current.appliedOverrideRevision,
+      pendingOverrideRevision: input.extensionOverridesRevision,
+    });
+    if (input.defer === true) {
+      return { state: pendingState };
+    }
+
+    const context = sessions.get(input.threadId);
+    if (!context || context.stopped || !context.started) {
+      const state = yield* publishReconciliationState(input, {
+        appliedOverrideRevision: input.extensionOverridesRevision,
+      });
+      return { state };
+    }
+
+    const previousSession = yield* context.runtime.getSession;
+    const result = yield* startSession({
+      provider: PROVIDER,
+      providerInstanceId: boundInstanceId,
+      threadId: input.threadId,
+      cwd: input.cwd,
+      runtimeMode: input.runtimeMode ?? previousSession.runtimeMode,
+      ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
+      ...(previousSession.resumeCursor !== undefined
+        ? { resumeCursor: previousSession.resumeCursor }
+        : {}),
+      extensionOverrides: {
+        skills: input.skillOverrides,
+        mcp: input.mcpOverrides,
+        revision: input.extensionOverridesRevision,
+      },
+    }).pipe(
+      Effect.tapError((error) => {
+        const failedState = reconciliationState(input.threadId);
+        return failedState.pendingOverrideRevision === input.extensionOverridesRevision &&
+          failedState.error !== undefined
+          ? Effect.void
+          : publishReconciliationState(input, {
+              appliedOverrideRevision: current.appliedOverrideRevision,
+              pendingOverrideRevision: input.extensionOverridesRevision,
+              error: {
+                domain: "all",
+                message: error.message,
+                retryable: true,
+              },
+            }).pipe(Effect.ignore);
+      }),
+    );
+    return {
+      state: reconciliationState(input.threadId),
+      session: result,
+    };
+  });
+
   const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>
     Effect.gen(function* () {
       const session = sessions.get(threadId);
@@ -2706,6 +2950,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       capabilities: CODEX_EXTENSION_CAPABILITIES,
       skills: skillsFacet,
       mcp: mcpFacet,
+      reconcileOverrides,
+      reconciliationState: (threadId) => Effect.succeed(reconciliationState(threadId)),
       get events() {
         return Stream.fromPubSub(extensionEvents);
       },

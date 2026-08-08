@@ -3,7 +3,10 @@ import type {
   ProviderExtensionCapabilities,
   ProviderExtensionItemId,
   ProviderMcpServer,
+  ProviderMcpOverrides,
+  ProviderSession,
   ProviderSkill,
+  ProviderSkillOverrides,
   RuntimeMode,
   ThreadExtensionsMcpAuthResult,
   ThreadExtensionsRefreshDomain,
@@ -62,7 +65,37 @@ export type ProviderExtensionManagementEvent =
       readonly cwd: string;
       readonly mcpServerId: ProviderExtensionItemId;
       readonly revision: number;
+    }
+  | {
+      readonly type: "overrides.reconciliation.changed";
+      readonly threadId: ThreadId;
+      readonly cwd: string;
+      readonly state: ProviderExtensionReconciliationState;
     };
+
+export interface ProviderExtensionReconciliationError {
+  readonly domain: "all";
+  readonly message: string;
+  readonly retryable: true;
+}
+
+export interface ProviderExtensionReconciliationState {
+  readonly appliedOverrideRevision: number;
+  readonly pendingOverrideRevision?: number;
+  readonly error?: ProviderExtensionReconciliationError;
+}
+
+export interface ProviderExtensionReconciliationInput extends ProviderExtensionRuntimeContext {
+  readonly skillOverrides: ProviderSkillOverrides;
+  readonly mcpOverrides: ProviderMcpOverrides;
+  readonly extensionOverridesRevision: number;
+  readonly defer?: boolean;
+}
+
+export interface ProviderExtensionReconciliationResult {
+  readonly state: ProviderExtensionReconciliationState;
+  readonly session?: ProviderSession;
+}
 
 export interface ProviderExtensionSkillsFacet {
   readonly inventory: (
@@ -104,6 +137,12 @@ export interface ProviderExtensionsShape {
   readonly capabilities: ProviderExtensionCapabilities;
   readonly skills?: ProviderExtensionSkillsFacet;
   readonly mcp?: ProviderExtensionMcpFacet;
+  readonly reconcileOverrides?: (
+    input: ProviderExtensionReconciliationInput,
+  ) => Effect.Effect<ProviderExtensionReconciliationResult, ProviderAdapterError>;
+  readonly reconciliationState?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProviderExtensionReconciliationState>;
   readonly events: Stream.Stream<ProviderExtensionManagementEvent>;
 }
 

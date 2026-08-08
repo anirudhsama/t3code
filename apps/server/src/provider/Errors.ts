@@ -68,6 +68,22 @@ export class ProviderAdapterRequestError extends Schema.TaggedErrorClass<Provide
   }
 }
 
+/** Selected skill identity no longer resolves to an effectively enabled provider skill. */
+export class ProviderAdapterStaleSkillSelectionError extends Schema.TaggedErrorClass<ProviderAdapterStaleSkillSelectionError>()(
+  "ProviderAdapterStaleSkillSelectionError",
+  {
+    provider: Schema.String,
+    threadId: Schema.String,
+    skillId: Schema.String,
+    skillName: Schema.String,
+    reason: Schema.Literals(["missing", "disabled", "identity-mismatch"]),
+  },
+) {
+  override get message(): string {
+    return `Selected skill '${this.skillName}' (${this.skillId}) is stale for ${this.provider} thread '${this.threadId}': ${this.reason}.`;
+  }
+}
+
 /**
  * ProviderAdapterProcessError - Provider process lifecycle failure.
  */
@@ -192,6 +208,7 @@ export type ProviderAdapterError =
   | ProviderAdapterSessionNotFoundError
   | ProviderAdapterSessionClosedError
   | ProviderAdapterRequestError
+  | ProviderAdapterStaleSkillSelectionError
   | ProviderAdapterProcessError;
 
 export type ProviderServiceError =

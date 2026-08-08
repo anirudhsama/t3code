@@ -14,6 +14,7 @@ import {
   ApprovalRequestId,
   EventId,
   ProviderDriverKind,
+  ProviderExtensionItemId,
   ProviderInstanceId,
   ProviderSessionStartInput,
   ThreadId,
@@ -198,6 +199,16 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
         sessions.clear();
       }),
   );
+  const reconcileOverrides = vi.fn<
+    NonNullable<
+      NonNullable<ProviderAdapterShape<ProviderAdapterError>["extensions"]>["reconcileOverrides"]
+    >
+  >((input) =>
+    Effect.succeed({
+      state: { appliedOverrideRevision: input.extensionOverridesRevision },
+    }),
+  );
+  const reconciliationState = vi.fn(() => Effect.succeed({ appliedOverrideRevision: 0 }));
 
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
@@ -215,6 +226,21 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     readThread,
     rollbackThread,
     stopAll,
+    extensions: {
+      capabilities: {
+        skills: { inventory: true, refresh: true, threadOverride: true },
+        mcp: {
+          inventory: true,
+          liveStatus: true,
+          threadOverride: true,
+          reconnect: false,
+          authenticate: false,
+        },
+      },
+      reconcileOverrides,
+      reconciliationState,
+      events: Stream.empty,
+    },
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
@@ -250,6 +276,8 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     readThread,
     rollbackThread,
     stopAll,
+    reconcileOverrides,
+    reconciliationState,
   };
 }
 
@@ -841,6 +869,36 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("routes extension reconciliation through the bound provider instance", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const result = yield* provider.reconcileExtensions!({
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-extensions"),
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+        skillOverrides: {},
+        mcpOverrides: { [ProviderExtensionItemId.make("postgres")]: "disabled" },
+        extensionOverridesRevision: 4,
+      });
+      const state = yield* provider.getExtensionReconciliationState!({
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-extensions"),
+      });
+
+      assert.equal(result.state.appliedOverrideRevision, 4);
+      assert.equal(state.appliedOverrideRevision, 0);
+      assert.deepEqual(routing.codex.reconcileOverrides.mock.calls[0]?.[0], {
+        threadId: asThreadId("thread-extensions"),
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+        skillOverrides: {},
+        mcpOverrides: { [ProviderExtensionItemId.make("postgres")]: "disabled" },
+        extensionOverridesRevision: 4,
+      });
+    }),
+  );
+
   it.effect("routes provider operations and rollback conversation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
