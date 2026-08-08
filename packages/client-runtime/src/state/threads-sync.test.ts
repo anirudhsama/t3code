@@ -77,6 +77,9 @@ const BASE_THREAD: OrchestrationThread = {
   activities: [],
   checkpoints: [],
   session: null,
+  skillOverrides: {},
+  mcpOverrides: {},
+  extensionOverridesRevision: 0,
 };
 const ACTIVE_THREAD: OrchestrationThread = {
   ...BASE_THREAD,

@@ -81,6 +81,14 @@ it.effect("round-trips extension RPC payloads and results", () =>
   Effect.gen(function* () {
     const cases = [
       [ThreadExtensionsRpcSchemas.getThreadSnapshot.input, { threadId: "thread-1" }],
+      [
+        ThreadExtensionsRpcSchemas.getPreviewSnapshot.input,
+        {
+          threadId: "thread-pending",
+          projectId: "project-1",
+          providerInstanceId: "codex",
+        },
+      ],
       [ThreadExtensionsRpcSchemas.refreshThread.input, { threadId: "thread-1", domain: "skills" }],
       [ThreadExtensionsRpcSchemas.subscribeThread.input, { threadId: "thread-1" }],
       [

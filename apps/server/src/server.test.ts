@@ -12,6 +12,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   EventId,
+  EXTENSIONS_WS_METHODS,
   GitCommandError,
   KeybindingRule,
   MessageId,
@@ -19,6 +20,7 @@ import {
   OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadStreamItem,
   type OrchestrationThreadShell,
+  type ThreadExtensionsSnapshot,
   TerminalNotRunningError,
   type OrchestrationCommand,
   type OrchestrationEvent,
@@ -113,6 +115,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ThreadExtensions from "./provider/Services/ThreadExtensions.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -235,6 +238,9 @@ const makeDefaultOrchestrationReadModel = () => {
         activities: [],
         proposedPlans: [],
         checkpoints: [],
+        skillOverrides: {},
+        mcpOverrides: {},
+        extensionOverridesRevision: 0,
         deletedAt: null,
       },
     ],
@@ -265,6 +271,9 @@ const makeDefaultOrchestrationThreadShell = (
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    skillOverrides: {},
+    mcpOverrides: {},
+    extensionOverridesRevision: 0,
     ...overrides,
   };
 };
@@ -385,6 +394,7 @@ const buildAppUnderTest = (options?: {
   layers?: {
     keybindings?: Partial<Keybindings.Keybindings["Service"]>;
     providerRegistry?: Partial<ProviderRegistry.ProviderRegistry["Service"]>;
+    threadExtensions?: Partial<ThreadExtensions.ThreadExtensions["Service"]>;
     serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
     externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
     vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
@@ -626,18 +636,32 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getProviders: Effect.succeed([]),
-          refresh: () => Effect.succeed([]),
-          refreshInstance: () => Effect.succeed([]),
-          getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
-            Effect.succeed(
-              makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
-            ),
-          setProviderMaintenanceActionState: () => Effect.succeed([]),
-          streamChanges: Stream.empty,
-          ...options?.layers?.providerRegistry,
-        }),
+        Layer.mergeAll(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([]),
+            refresh: () => Effect.succeed([]),
+            refreshInstance: () => Effect.succeed([]),
+            getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+              Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
+              ),
+            setProviderMaintenanceActionState: () => Effect.succeed([]),
+            streamChanges: Stream.empty,
+            ...options?.layers?.providerRegistry,
+          }),
+          Layer.mock(ThreadExtensions.ThreadExtensions)({
+            snapshot: () => Effect.die("ThreadExtensions.snapshot not stubbed in this test"),
+            previewSnapshot: () =>
+              Effect.die("ThreadExtensions.previewSnapshot not stubbed in this test"),
+            refresh: () => Effect.die("ThreadExtensions.refresh not stubbed in this test"),
+            events: () => Stream.empty,
+            reconnectMcp: () =>
+              Effect.die("ThreadExtensions.reconnectMcp not stubbed in this test"),
+            beginMcpAuth: () =>
+              Effect.die("ThreadExtensions.beginMcpAuth not stubbed in this test"),
+            ...options?.layers?.threadExtensions,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ServerSettings.ServerSettingsService)({
@@ -5813,6 +5837,66 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("routes revisioned extension snapshots and subscription synchronization", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-extensions");
+      const extensionSnapshot: ThreadExtensionsSnapshot = {
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        provider: ProviderDriverKind.make("codex"),
+        cwd: "/tmp/extensions-project",
+        capabilities: {
+          skills: { inventory: true, refresh: true, threadOverride: true },
+          mcp: {
+            inventory: true,
+            liveStatus: true,
+            threadOverride: true,
+            reconnect: false,
+            authenticate: false,
+          },
+        },
+        skills: [],
+        mcpServers: [],
+        inventoryRevision: 3,
+        overrideRevision: 2,
+        appliedOverrideRevision: 2,
+        loading: { skills: false, mcp: false },
+        errors: [],
+        refreshedAt: "2026-01-01T00:00:00.000Z",
+      };
+
+      yield* buildAppUnderTest({
+        layers: {
+          threadExtensions: {
+            snapshot: () => Effect.succeed(extensionSnapshot),
+            events: () => Stream.make(extensionSnapshot),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const fetched = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[EXTENSIONS_WS_METHODS.getThreadSnapshot]({ threadId }),
+        ),
+      );
+      assert.equal(fetched.inventoryRevision, 3);
+
+      const streamed = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[EXTENSIONS_WS_METHODS.subscribeThread]({ threadId }).pipe(
+            Stream.take(2),
+            Stream.runCollect,
+          ),
+        ),
+      );
+      assert.deepEqual(Array.from(streamed), [
+        { kind: "snapshot", snapshot: extensionSnapshot },
+        { kind: "synchronized" },
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("routes websocket rpc orchestration methods", () =>
     Effect.gen(function* () {
       const now = "2026-01-01T00:00:00.000Z";
@@ -5852,6 +5936,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             activities: [],
             proposedPlans: [],
             checkpoints: [],
+            skillOverrides: {},
+            mcpOverrides: {},
+            extensionOverridesRevision: 0,
             deletedAt: null,
           },
         ],

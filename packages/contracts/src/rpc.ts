@@ -772,6 +772,15 @@ export const WsExtensionsGetThreadSnapshotRpc = Rpc.make(EXTENSIONS_WS_METHODS.g
   error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
 });
 
+export const WsExtensionsGetPreviewSnapshotRpc = Rpc.make(
+  EXTENSIONS_WS_METHODS.getPreviewSnapshot,
+  {
+    payload: ThreadExtensionsRpcSchemas.getPreviewSnapshot.input,
+    success: ThreadExtensionsRpcSchemas.getPreviewSnapshot.output,
+    error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsExtensionsRefreshThreadRpc = Rpc.make(EXTENSIONS_WS_METHODS.refreshThread, {
   payload: ThreadExtensionsRpcSchemas.refreshThread.input,
   success: ThreadExtensionsRpcSchemas.refreshThread.output,
@@ -930,6 +939,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
   WsExtensionsGetThreadSnapshotRpc,
+  WsExtensionsGetPreviewSnapshotRpc,
   WsExtensionsRefreshThreadRpc,
   WsExtensionsSubscribeThreadRpc,
   WsExtensionsReconnectMcpRpc,

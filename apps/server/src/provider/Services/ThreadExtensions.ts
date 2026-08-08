@@ -9,6 +9,7 @@ import type {
   ProviderSkillOverrides,
   RuntimeMode,
   ThreadExtensionsMcpAuthResult,
+  ThreadExtensionsGetPreviewSnapshotInput,
   ThreadExtensionsRefreshDomain,
   ThreadExtensionsRpcError,
   ThreadExtensionsSnapshot,
@@ -150,6 +151,9 @@ export interface ThreadExtensionsShape {
   readonly snapshot: (input: {
     readonly threadId: ThreadId;
   }) => Effect.Effect<ThreadExtensionsSnapshot, ThreadExtensionsRpcError>;
+  readonly previewSnapshot: (
+    input: ThreadExtensionsGetPreviewSnapshotInput,
+  ) => Effect.Effect<ThreadExtensionsSnapshot, ThreadExtensionsRpcError>;
   readonly refresh: (input: {
     readonly threadId: ThreadId;
     readonly domain?: ThreadExtensionsRefreshDomain;

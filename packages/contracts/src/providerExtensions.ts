@@ -1,6 +1,12 @@
 import * as Schema from "effect/Schema";
 
-import { IsoDateTime, NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 export const ProviderExtensionItemId = TrimmedNonEmptyString.pipe(
@@ -164,6 +170,14 @@ export const ThreadExtensionsGetSnapshotInput = Schema.Struct({
 });
 export type ThreadExtensionsGetSnapshotInput = typeof ThreadExtensionsGetSnapshotInput.Type;
 
+export const ThreadExtensionsGetPreviewSnapshotInput = Schema.Struct({
+  threadId: ThreadId,
+  projectId: ProjectId,
+  providerInstanceId: ProviderInstanceId,
+});
+export type ThreadExtensionsGetPreviewSnapshotInput =
+  typeof ThreadExtensionsGetPreviewSnapshotInput.Type;
+
 export const ThreadExtensionsRefreshInput = Schema.Struct({
   threadId: ThreadId,
   domain: Schema.optional(ThreadExtensionsRefreshDomain),
@@ -214,6 +228,7 @@ export class ThreadExtensionsRpcError extends Schema.TaggedErrorClass<ThreadExte
 
 export const EXTENSIONS_WS_METHODS = {
   getThreadSnapshot: "extensions.getThreadSnapshot",
+  getPreviewSnapshot: "extensions.getPreviewSnapshot",
   refreshThread: "extensions.refreshThread",
   subscribeThread: "extensions.subscribeThread",
   reconnectMcp: "extensions.reconnectMcp",
@@ -223,6 +238,10 @@ export const EXTENSIONS_WS_METHODS = {
 export const ThreadExtensionsRpcSchemas = {
   getThreadSnapshot: {
     input: ThreadExtensionsGetSnapshotInput,
+    output: ThreadExtensionsSnapshot,
+  },
+  getPreviewSnapshot: {
+    input: ThreadExtensionsGetPreviewSnapshotInput,
     output: ThreadExtensionsSnapshot,
   },
   refreshThread: {

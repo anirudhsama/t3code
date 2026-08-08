@@ -158,6 +158,9 @@ describe("OrchestrationEngine", () => {
           activities: [],
           checkpoints: [],
           session: null,
+          skillOverrides: {},
+          mcpOverrides: {},
+          extensionOverridesRevision: 0,
         },
       ],
     };

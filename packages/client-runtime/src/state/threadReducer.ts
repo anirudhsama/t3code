@@ -100,6 +100,9 @@ export function applyThreadDetailEvent(
           activities: [],
           checkpoints: [],
           session: null,
+          skillOverrides: {},
+          mcpOverrides: {},
+          extensionOverridesRevision: 0,
         },
       };
 

@@ -43,6 +43,9 @@ const baseThread: OrchestrationThread = {
   activities: [],
   checkpoints: [],
   session: null,
+  skillOverrides: {},
+  mcpOverrides: {},
+  extensionOverridesRevision: 0,
 };
 
 describe("applyThreadDetailEvent", () => {

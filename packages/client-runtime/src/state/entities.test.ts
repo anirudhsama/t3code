@@ -103,6 +103,9 @@ const THREAD_SHELL = {
   hasPendingApprovals: false,
   hasPendingUserInput: false,
   hasActionableProposedPlan: false,
+  skillOverrides: {},
+  mcpOverrides: {},
+  extensionOverridesRevision: 0,
 } as const;
 
 const SNAPSHOT: OrchestrationShellSnapshot = {

@@ -378,6 +378,9 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             lastError: null,
             updatedAt: "2026-02-24T00:00:07.000Z",
           },
+          skillOverrides: {},
+          mcpOverrides: {},
+          extensionOverridesRevision: 0,
         },
       ]);
 
@@ -456,6 +459,9 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           hasActionableProposedPlan: false,
           backgroundLiveness: null,
           planProgress: null,
+          skillOverrides: {},
+          mcpOverrides: {},
+          extensionOverridesRevision: 0,
         },
       ]);
 

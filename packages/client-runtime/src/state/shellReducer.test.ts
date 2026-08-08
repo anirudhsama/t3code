@@ -43,6 +43,9 @@ const stubThread = {
   hasPendingUserInput: false,
   hasActionableProposedPlan: false,
   session: null,
+  skillOverrides: {},
+  mcpOverrides: {},
+  extensionOverridesRevision: 0,
 } as const;
 
 describe("applyShellStreamEvent", () => {

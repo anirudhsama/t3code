@@ -100,6 +100,9 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingApprovalCount: 0,
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
+        skillOverrides: {},
+        mcpOverrides: {},
+        extensionOverridesRevision: 0,
         deletedAt: null,
       });
 
@@ -163,6 +166,9 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingApprovalCount: 0,
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
+        skillOverrides: {},
+        mcpOverrides: {},
+        extensionOverridesRevision: 0,
         deletedAt: null,
       });
 

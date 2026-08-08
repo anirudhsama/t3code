@@ -50,6 +50,8 @@ import {
   AssetWorkspaceContextResolutionError,
   RpcClientId,
   EnvironmentAuthorizationError,
+  EXTENSIONS_WS_METHODS,
+  ThreadExtensionsRpcError,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
@@ -79,6 +81,7 @@ import {
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ThreadExtensions from "./provider/Services/ThreadExtensions.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -368,6 +371,7 @@ const makeWsRpcLayer = (
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const threadExtensions = yield* ThreadExtensions.ThreadExtensions;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
@@ -1397,6 +1401,71 @@ const makeWsRpcLayer = (
               );
             }),
             { "rpc.aggregate": "orchestration" },
+          ),
+        [EXTENSIONS_WS_METHODS.getThreadSnapshot]: (input) =>
+          observeRpcEffect(
+            EXTENSIONS_WS_METHODS.getThreadSnapshot,
+            threadExtensions.snapshot(input),
+            {
+              "rpc.aggregate": "extensions",
+            },
+          ),
+        [EXTENSIONS_WS_METHODS.getPreviewSnapshot]: (input) =>
+          observeRpcEffect(
+            EXTENSIONS_WS_METHODS.getPreviewSnapshot,
+            threadExtensions.previewSnapshot(input),
+            { "rpc.aggregate": "extensions" },
+          ),
+        [EXTENSIONS_WS_METHODS.refreshThread]: (input) =>
+          observeRpcEffect(
+            EXTENSIONS_WS_METHODS.refreshThread,
+            threadExtensions.refresh({
+              threadId: input.threadId,
+              ...(input.domain === undefined ? {} : { domain: input.domain }),
+            }),
+            { "rpc.aggregate": "extensions" },
+          ),
+        [EXTENSIONS_WS_METHODS.subscribeThread]: (input) =>
+          observeRpcStream(
+            EXTENSIONS_WS_METHODS.subscribeThread,
+            threadExtensions.events(input).pipe(
+              Stream.mapAccum(
+                () => true,
+                (first, snapshot) => [
+                  false,
+                  first
+                    ? [{ kind: "snapshot" as const, snapshot }, { kind: "synchronized" as const }]
+                    : [{ kind: "snapshot" as const, snapshot }],
+                ],
+              ),
+            ),
+            { "rpc.aggregate": "extensions" },
+          ),
+        [EXTENSIONS_WS_METHODS.reconnectMcp]: (input) =>
+          observeRpcEffect(
+            EXTENSIONS_WS_METHODS.reconnectMcp,
+            threadExtensions.reconnectMcp?.(input) ??
+              Effect.fail(
+                new ThreadExtensionsRpcError({
+                  reason: "unsupported",
+                  message: "This server does not support MCP reconnect.",
+                  retryable: false,
+                }),
+              ),
+            { "rpc.aggregate": "extensions" },
+          ),
+        [EXTENSIONS_WS_METHODS.beginMcpAuth]: (input) =>
+          observeRpcEffect(
+            EXTENSIONS_WS_METHODS.beginMcpAuth,
+            threadExtensions.beginMcpAuth?.(input) ??
+              Effect.fail(
+                new ThreadExtensionsRpcError({
+                  reason: "unsupported",
+                  message: "This server does not support MCP authentication.",
+                  retryable: false,
+                }),
+              ),
+            { "rpc.aggregate": "extensions" },
           ),
         [WS_METHODS.serverProbe]: (_input) =>
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
