@@ -115,6 +115,27 @@ describe("ProviderSessionStartInput", () => {
 });
 
 describe("ProviderSendTurnInput", () => {
+  it("preserves selected skill identity and path", () => {
+    const parsed = decodeProviderSendTurnInput({
+      threadId: "thread-1",
+      selectedSkills: [
+        {
+          id: "/tmp/skills/review/SKILL.md",
+          name: "review",
+          path: "/tmp/skills/review/SKILL.md",
+        },
+      ],
+    });
+
+    expect(parsed.selectedSkills).toEqual([
+      {
+        id: "/tmp/skills/review/SKILL.md",
+        name: "review",
+        path: "/tmp/skills/review/SKILL.md",
+      },
+    ]);
+  });
+
   it("accepts codex modelSelection", () => {
     const parsed = decodeProviderSendTurnInput({
       threadId: "thread-1",
