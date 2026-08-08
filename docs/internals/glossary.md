@@ -116,6 +116,13 @@ Controls how assistant text reaches the thread timeline. In [the contracts][1], 
 
 A point-in-time view of state. The word is used in multiple layers, including orchestration, provider, and checkpointing. See [ProjectionSnapshotQuery.ts][10], [ProviderAdapter.ts][15], and [CheckpointStore.ts][19].
 
+#### Thread extension override
+
+A thread-local desired setting that enables or disables a provider skill or MCP server without
+editing provider-owned files or configuration. Overrides are event-sourced and are distinct from
+the revision currently applied by a live provider runtime. See
+[thread-extensions.md](./thread-extensions.md).
+
 ### Checkpointing
 
 Checkpointing captures workspace state over time so the app can diff turns and restore earlier points. The main pieces are [CheckpointStore.ts][19], [CheckpointDiffQuery.ts][20], and [CheckpointReactor.ts][6].
