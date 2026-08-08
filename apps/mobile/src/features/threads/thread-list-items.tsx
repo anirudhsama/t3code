@@ -23,6 +23,7 @@ import { useThreadPr, type ThreadPr } from "../../state/use-thread-pr";
 import type { HomeGroupDisplayAction } from "../home/homeListItems";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { resolveThreadStatus } from "./threadPresentation";
+import { buildThreadListMenuActions } from "./thread-list-menu";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 
 /**
@@ -410,11 +411,6 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
 
 /* ─── Thread row ─────────────────────────────────────────────────────── */
 
-const THREAD_ROW_MENU_ACTIONS: MenuAction[] = [
-  { id: "archive", title: "Archive", image: "archivebox" },
-  { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
-];
-
 export const ThreadListRow = memo(function ThreadListRow(props: {
   readonly variant: ThreadListVariant;
   readonly thread: EnvironmentThreadShell;
@@ -430,6 +426,10 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
   readonly onArchiveThread: (thread: EnvironmentThreadShell) => void;
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
+  readonly onNewThreadFromThread: (thread: EnvironmentThreadShell) => void;
+  readonly onRenameThread: (thread: EnvironmentThreadShell) => void;
+  readonly onRegenerateThreadTitle: (thread: EnvironmentThreadShell) => void;
+  readonly titleRegenerationSupported: boolean;
   readonly onSwipeableWillOpen: (methods: SwipeableMethods) => void;
   readonly onSwipeableClose: (methods: SwipeableMethods) => void;
   readonly simultaneousSwipeGesture?: ComponentProps<
@@ -471,6 +471,27 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
 
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
   const handleArchive = useCallback(() => onArchiveThread(thread), [onArchiveThread, thread]);
+  const handleNewThread = useCallback(
+    () => props.onNewThreadFromThread(thread),
+    [props.onNewThreadFromThread, thread],
+  );
+  const handleRename = useCallback(
+    () => props.onRenameThread(thread),
+    [props.onRenameThread, thread],
+  );
+  const handleRegenerateTitle = useCallback(
+    () => props.onRegenerateThreadTitle(thread),
+    [props.onRegenerateThreadTitle, thread],
+  );
+  const menuActions = useMemo(
+    () =>
+      buildThreadListMenuActions({
+        thread,
+        lifecycleActions: [{ id: "archive", title: "Archive", image: "archivebox" }],
+        titleRegenerationSupported: props.titleRegenerationSupported,
+      }),
+    [props.titleRegenerationSupported, thread],
+  );
   const primaryAction = useMemo(
     () => ({
       accessibilityLabel: `Archive ${thread.title}`,
@@ -482,10 +503,13 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
+      if (nativeEvent.event === "new-thread-on-branch") handleNewThread();
       if (nativeEvent.event === "archive") handleArchive();
+      if (nativeEvent.event === "rename") handleRename();
+      if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "delete") handleDelete();
     },
-    [handleArchive, handleDelete],
+    [handleArchive, handleDelete, handleNewThread, handleRegenerateTitle, handleRename],
   );
 
   const statusPill = effectiveStatus ? (
@@ -674,7 +698,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         // ControlPillMenu injects onLongPress into the row and anchors the
         // token-styled dropdown to it; taps and swipes are untouched.
         <ControlPillMenu
-          actions={THREAD_ROW_MENU_ACTIONS}
+          actions={menuActions}
           onPressAction={handleMenuAction}
           shouldOpenOnLongPress
         >
