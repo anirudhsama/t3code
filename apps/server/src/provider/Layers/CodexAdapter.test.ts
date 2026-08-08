@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
   ProviderExtensionItemId,
@@ -37,6 +38,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   type ProviderAdapterError,
@@ -60,6 +62,9 @@ import {
   parseCodexMcpDefinitions,
 } from "./CodexAdapter.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+const isProviderAdapterStaleSkillSelectionError = Schema.is(
+  ProviderAdapterStaleSkillSelectionError,
+);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
 class CodexAdapter extends Context.Service<CodexAdapter, CodexAdapterShape>()(
@@ -1564,8 +1569,7 @@ it.effect("dispatches exact selected skills and rejects stale or disabled select
         .pipe(Effect.result);
       NodeAssert.equal(disabled._tag, "Failure");
       NodeAssert.ok(
-        disabled._tag === "Failure" &&
-          Schema.is(ProviderAdapterStaleSkillSelectionError)(disabled.failure),
+        disabled._tag === "Failure" && isProviderAdapterStaleSkillSelectionError(disabled.failure),
       );
       if (
         disabled._tag === "Failure" &&
@@ -1692,6 +1696,50 @@ it.effect("reuses a lazily initialized management runtime for the first turn", (
       });
       NodeAssert.equal(yield* adapter.hasSession(threadId), true);
     }),
+  );
+});
+
+it.effect("restarts a prepared runtime when managed MCP credentials appear", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const threadId = asThreadId("thread-lazy-managed-mcp");
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      yield* adapter.extensions.skills!.inventory({ threadId, cwd: "/workspace/lazy-mcp" });
+      const preparedRuntime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(preparedRuntime);
+
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-managed-mcp"),
+        threadId,
+        providerSessionId: "managed-session",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        endpoint: "http://127.0.0.1:4123/mcp",
+        authorizationHeader: "Bearer managed-token",
+      });
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        cwd: "/workspace/lazy-mcp",
+        runtimeMode: "auto-accept-edits",
+      });
+
+      NodeAssert.equal(runtimeFactory.factory.mock.calls.length, 2);
+      NodeAssert.equal(preparedRuntime.closeImpl.mock.calls.length, 1);
+      NodeAssert.deepStrictEqual(runtimeFactory.lastRuntime?.options.appServerArgs, [
+        "-c",
+        "mcp_servers.t3-code.url=http://127.0.0.1:4123/mcp",
+        "-c",
+        'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+      ]);
+      NodeAssert.equal(
+        runtimeFactory.lastRuntime?.options.environment?.T3_MCP_BEARER_TOKEN,
+        "managed-token",
+      );
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+    ),
   );
 });
 

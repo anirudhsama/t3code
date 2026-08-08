@@ -406,6 +406,7 @@ export interface CodexAdapterLiveOptions {
 interface CodexAdapterSessionContext {
   readonly threadId: ThreadId;
   readonly cwd: string;
+  readonly mcpProviderSessionId: string | null;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
@@ -2187,6 +2188,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     const context: CodexAdapterSessionContext = {
       threadId: runtimeInput.threadId,
       cwd: runtimeInput.cwd,
+      mcpProviderSessionId:
+        McpProviderSession.readMcpProviderSession(runtimeInput.threadId)?.providerSessionId ?? null,
       scope: sessionScope,
       runtime,
       eventFiber,
@@ -2233,10 +2236,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       }
 
       const cwd = yield* canonicalizeCwd(input.cwd ?? process.cwd());
+      const mcpProviderSessionId =
+        McpProviderSession.readMcpProviderSession(input.threadId)?.providerSessionId ?? null;
       let context = sessions.get(input.threadId);
       let reusePreparedRuntime =
-        context !== undefined && !context.stopped && !context.started && context.cwd === cwd;
+        context !== undefined &&
+        !context.stopped &&
+        !context.started &&
+        context.cwd === cwd &&
+        context.mcpProviderSessionId === mcpProviderSessionId;
       if (context && !context.stopped && !reusePreparedRuntime) {
+        mcpDefinitionCache.cache.delete(cacheKey(context.cwd));
         yield* stopSessionInternal(context);
         context = undefined;
       }

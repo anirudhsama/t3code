@@ -6025,6 +6025,7 @@ function ChatViewContent(props: ChatViewProps) {
       />
     ) : activeRightPanelSurface?.kind === "extensions" ? (
       <ExtensionsPanel
+        key={`${activeThreadRef.environmentId}:${activeThreadRef.threadId}`}
         environmentId={activeThreadRef.environmentId}
         threadId={activeThreadRef.threadId}
         snapshot={extensionsQuery.data}

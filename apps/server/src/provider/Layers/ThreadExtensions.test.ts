@@ -71,7 +71,7 @@ const thread = (input?: {
   extensionOverridesRevision: input?.revision ?? 0,
 });
 
-function makeInstance(): ProviderInstance {
+function makeInstance(reconciliation: "failed" | "idle" = "failed"): ProviderInstance {
   return {
     instanceId: INSTANCE_ID,
     driverKind: ProviderDriverKind.make("codex"),
@@ -145,11 +145,19 @@ function makeInstance(): ProviderInstance {
         refresh: () => Effect.succeed({ items: [], revision: 8, warnings: [] }),
       },
       reconciliationState: () =>
-        Effect.succeed({
-          appliedOverrideRevision: 1,
-          pendingOverrideRevision: 2,
-          error: { domain: "all" as const, message: "retry me", retryable: true as const },
-        }),
+        Effect.succeed(
+          reconciliation === "failed"
+            ? {
+                appliedOverrideRevision: 1,
+                pendingOverrideRevision: 2,
+                error: { domain: "all" as const, message: "retry me", retryable: true as const },
+              }
+            : {
+                appliedOverrideRevision: 0,
+                pendingOverrideRevision: undefined,
+                error: undefined,
+              },
+        ),
       events: Stream.empty,
     },
   } as unknown as ProviderInstance;
@@ -248,10 +256,28 @@ describe("ThreadExtensions", () => {
       const service = yield* makeService({
         threads: new Map([[THREAD_ID, current]]),
         active: false,
+        instance: makeInstance("idle"),
       });
       const snapshot = yield* service.snapshot({ threadId: THREAD_ID });
       expect(snapshot.appliedOverrideRevision).toBe(9);
       expect(snapshot.errors).toEqual([]);
+    }),
+  );
+
+  it.effect("keeps failed reconciliation visible after its provider session exits", () =>
+    Effect.gen(function* () {
+      const current = thread({ skillState: "disabled", revision: 2 });
+      const service = yield* makeService({
+        threads: new Map([[THREAD_ID, current]]),
+        active: false,
+      });
+      const snapshot = yield* service.snapshot({ threadId: THREAD_ID });
+      expect(snapshot.appliedOverrideRevision).toBe(1);
+      expect(snapshot.errors).toContainEqual({
+        domain: "all",
+        message: "retry me",
+        retryable: true,
+      });
     }),
   );
 

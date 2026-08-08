@@ -400,15 +400,18 @@ export const makeThreadExtensions = Effect.fn("makeThreadExtensions")(
       const inventory = yield* loadRawInventory(context, options);
       const errors = [...inventory.errors];
       let appliedOverrideRevision = context.thread.extensionOverridesRevision;
-      if (context.hasActiveSession && context.instance.extensions?.reconciliationState) {
+      if (context.instance.extensions?.reconciliationState) {
         const reconciliation = yield* context.instance.extensions.reconciliationState(
           context.threadId,
         );
-        appliedOverrideRevision = reconciliation.appliedOverrideRevision;
-        if (
-          reconciliation.error &&
-          reconciliation.pendingOverrideRevision === context.thread.extensionOverridesRevision
-        ) {
+        const reconciliationIsRelevant =
+          context.hasActiveSession ||
+          reconciliation.pendingOverrideRevision !== undefined ||
+          reconciliation.error !== undefined;
+        if (reconciliationIsRelevant) {
+          appliedOverrideRevision = reconciliation.appliedOverrideRevision;
+        }
+        if (reconciliationIsRelevant && reconciliation.error) {
           errors.push(
             snapshotError(
               reconciliation.error.domain,

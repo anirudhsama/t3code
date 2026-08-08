@@ -246,9 +246,9 @@ describe("buildTurnStartParams", () => {
     });
   });
 
-  it("encodes selected skills as structured app-server input", () => {
-    const params = Effect.runSync(
-      buildTurnStartParams({
+  it.effect("encodes selected skills as structured app-server input", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
         threadId: "provider-thread-1",
         runtimeMode: "full-access",
         prompt: "Review this",
@@ -258,18 +258,18 @@ describe("buildTurnStartParams", () => {
             path: "/workspace/.agents/skills/review/SKILL.md",
           },
         ],
-      }),
-    );
+      });
 
-    NodeAssert.deepStrictEqual(params.input, [
-      { type: "text", text: "Review this" },
-      {
-        type: "skill",
-        name: "review",
-        path: "/workspace/.agents/skills/review/SKILL.md",
-      },
-    ]);
-  });
+      NodeAssert.deepStrictEqual(params.input, [
+        { type: "text", text: "Review this" },
+        {
+          type: "skill",
+          name: "review",
+          path: "/workspace/.agents/skills/review/SKILL.md",
+        },
+      ]);
+    }),
+  );
 });
 
 describe("buildCodexDeveloperInstructions", () => {
