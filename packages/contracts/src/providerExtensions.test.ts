@@ -69,54 +69,80 @@ const snapshot = {
   refreshedAt: "2026-01-01T00:00:00.000Z",
 } as const;
 
-it.effect("round-trips a thread extensions snapshot", () =>
+const roundTrip = <A, I, E1, R1, E2, R2>(
+  decode: (value: unknown) => Effect.Effect<A, E1, R1>,
+  encode: (value: A) => Effect.Effect<I, E2, R2>,
+  value: unknown,
+) =>
   Effect.gen(function* () {
-    const decoded = yield* Schema.decodeUnknownEffect(ThreadExtensionsSnapshot)(snapshot);
-    const encoded = yield* Schema.encodeEffect(ThreadExtensionsSnapshot)(decoded);
-    assert.deepStrictEqual(encoded, snapshot);
-  }),
+    const decoded = yield* decode(value);
+    const encoded = yield* encode(decoded);
+    assert.deepStrictEqual(encoded, value);
+  });
+
+const snapshotRoundTrip = roundTrip(
+  Schema.decodeUnknownEffect(ThreadExtensionsSnapshot),
+  Schema.encodeEffect(ThreadExtensionsSnapshot),
+  snapshot,
 );
+
+const rpcRoundTrips = [
+  roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.getThreadSnapshot.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.getThreadSnapshot.input),
+    { threadId: "thread-1" },
+  ),
+  roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.getPreviewSnapshot.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.getPreviewSnapshot.input),
+    {
+      threadId: "thread-pending",
+      projectId: "project-1",
+      providerInstanceId: "codex",
+    },
+  ),
+  roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.refreshThread.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.refreshThread.input),
+    { threadId: "thread-1", domain: "skills" },
+  ),
+  roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.subscribeThread.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.subscribeThread.input),
+    { threadId: "thread-1" },
+  ),
+  roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.reconnectMcp.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.reconnectMcp.input),
+    { threadId: "thread-1", mcpServerId: "github" },
+  ),
+  roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.beginMcpAuth.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.beginMcpAuth.input),
+    { threadId: "thread-1", mcpServerId: "github" },
+  ),
+];
+
+const streamRoundTrip = roundTrip(
+  Schema.decodeUnknownEffect(ThreadExtensionsStreamItem),
+  Schema.encodeEffect(ThreadExtensionsStreamItem),
+  { kind: "snapshot", snapshot } as const,
+);
+
+const authRoundTrip = roundTrip(
+  Schema.decodeUnknownEffect(ThreadExtensionsMcpAuthResult),
+  Schema.encodeEffect(ThreadExtensionsMcpAuthResult),
+  { snapshot, authorizationUrl: "https://example.com/login" } as const,
+);
+
+it.effect("round-trips a thread extensions snapshot", () => snapshotRoundTrip);
 
 it.effect("round-trips extension RPC payloads and results", () =>
   Effect.gen(function* () {
-    const cases = [
-      [ThreadExtensionsRpcSchemas.getThreadSnapshot.input, { threadId: "thread-1" }],
-      [
-        ThreadExtensionsRpcSchemas.getPreviewSnapshot.input,
-        {
-          threadId: "thread-pending",
-          projectId: "project-1",
-          providerInstanceId: "codex",
-        },
-      ],
-      [ThreadExtensionsRpcSchemas.refreshThread.input, { threadId: "thread-1", domain: "skills" }],
-      [ThreadExtensionsRpcSchemas.subscribeThread.input, { threadId: "thread-1" }],
-      [
-        ThreadExtensionsRpcSchemas.reconnectMcp.input,
-        { threadId: "thread-1", mcpServerId: "github" },
-      ],
-      [
-        ThreadExtensionsRpcSchemas.beginMcpAuth.input,
-        { threadId: "thread-1", mcpServerId: "github" },
-      ],
-    ] as const;
-
-    for (const [schema, value] of cases) {
-      const decoded = yield* Schema.decodeUnknownEffect(schema)(value);
-      const encoded = yield* Schema.encodeEffect(schema)(decoded);
-      assert.deepStrictEqual(encoded, value);
+    for (const effect of rpcRoundTrips) {
+      yield* effect;
     }
-
-    const streamValue = { kind: "snapshot", snapshot } as const;
-    const streamDecoded = yield* Schema.decodeUnknownEffect(ThreadExtensionsStreamItem)(
-      streamValue,
-    );
-    const streamEncoded = yield* Schema.encodeEffect(ThreadExtensionsStreamItem)(streamDecoded);
-    assert.deepStrictEqual(streamEncoded, streamValue);
-
-    const authValue = { snapshot, authorizationUrl: "https://example.com/login" } as const;
-    const authDecoded = yield* Schema.decodeUnknownEffect(ThreadExtensionsMcpAuthResult)(authValue);
-    const authEncoded = yield* Schema.encodeEffect(ThreadExtensionsMcpAuthResult)(authDecoded);
-    assert.deepStrictEqual(authEncoded, authValue);
+    yield* streamRoundTrip;
+    yield* authRoundTrip;
   }),
 );
