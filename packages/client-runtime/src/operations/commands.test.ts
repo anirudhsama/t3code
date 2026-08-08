@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
+  ProviderExtensionItemId,
   ThreadId,
   type ClientOrchestrationCommand,
 } from "@t3tools/contracts";
@@ -24,6 +25,8 @@ import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   archiveThread,
   createProject,
+  setThreadMcpOverride,
+  setThreadSkillOverride,
   settleThread,
   stopThreadSession,
   unsettleThread,
@@ -167,6 +170,51 @@ describe("environment commands", () => {
           commandId: "unsettle-command",
           threadId: "thread-1",
           reason: "user",
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches revision-checked skill and MCP override commands", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+      const provideSupervisor = Effect.provideService(
+        EnvironmentSupervisor.EnvironmentSupervisor,
+        supervisor,
+      );
+
+      yield* setThreadSkillOverride({
+        threadId: ThreadId.make("thread-1"),
+        skillId: ProviderExtensionItemId.make("/repo/.agents/skills/review/SKILL.md"),
+        state: "disabled",
+        expectedRevision: 2,
+        createdAt: "2026-08-09T00:00:00.000Z",
+      }).pipe(provideSupervisor);
+      yield* setThreadMcpOverride({
+        threadId: ThreadId.make("thread-1"),
+        mcpServerId: ProviderExtensionItemId.make("linear"),
+        state: "enabled",
+        expectedRevision: 3,
+        createdAt: "2026-08-09T00:00:01.000Z",
+      }).pipe(provideSupervisor);
+
+      expect(dispatched).toMatchObject([
+        {
+          type: "thread.skill-override.set",
+          threadId: "thread-1",
+          skillId: "/repo/.agents/skills/review/SKILL.md",
+          state: "disabled",
+          expectedRevision: 2,
+          createdAt: "2026-08-09T00:00:00.000Z",
+        },
+        {
+          type: "thread.mcp-override.set",
+          threadId: "thread-1",
+          mcpServerId: "linear",
+          state: "enabled",
+          expectedRevision: 3,
+          createdAt: "2026-08-09T00:00:01.000Z",
         },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
