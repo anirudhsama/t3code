@@ -48,6 +48,7 @@ import {
 import { AndroidHomeFabLayout } from "../home/AndroidHomeFab";
 import { HomeListOptionsProvider } from "../home/home-list-options";
 import { ThreadNavigationSidebar } from "../threads/ThreadNavigationSidebar";
+import { seedNewTaskDraftFromThread } from "../threads/new-thread-from-thread";
 import { WORKSPACE_PANE_TIMING } from "./workspace-pane-animation";
 import { WorkspaceInspectorPane } from "./workspace-inspector-pane";
 
@@ -462,6 +463,20 @@ function AdaptiveWorkspaceLayoutContent(
     },
     [navigation],
   );
+  const handleNewThreadFromThread = useCallback(
+    (thread: EnvironmentThreadShell) => {
+      seedNewTaskDraftFromThread(thread);
+      navigation.navigate("NewTaskSheet", {
+        screen: "NewTaskDraft",
+        params: {
+          environmentId: String(thread.environmentId),
+          projectId: String(thread.projectId),
+          title: "New task",
+        },
+      });
+    },
+    [navigation],
+  );
 
   const renderedSidebarWidth = useSharedValue(
     panes.primarySidebarVisible ? (layout.listPaneWidth ?? 0) : 0,
@@ -543,6 +558,7 @@ function AdaptiveWorkspaceLayoutContent(
                     onOpenSettings={handleOpenSettings}
                     onOpenEnvironmentSettings={handleOpenEnvironmentSettings}
                     onNewThreadInProject={handleNewThreadInProject}
+                    onNewThreadFromThread={handleNewThreadFromThread}
                     onSelectThread={handleSelectThread}
                     onSearchQueryChange={setPrimarySidebarSearchQuery}
                     searchQuery={primarySidebarSearchQuery}
