@@ -54,6 +54,9 @@ type ProviderIntentEvent = Extract<
     type:
       | "thread.meta-updated"
       | "thread.runtime-mode-set"
+      | "thread.skill-override-set"
+      | "thread.mcp-override-set"
+      | "thread.session-set"
       | "thread.turn-start-requested"
       | "thread.turn-interrupt-requested"
       | "thread.approval-response-requested"
@@ -337,6 +340,7 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  const pendingExtensionReconciliations = new Map<ThreadId, number>();
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -627,6 +631,11 @@ const make = Effect.gen(function* () {
         providerInstanceId: desiredInstanceId,
         ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
         modelSelection: desiredModelSelection,
+        extensionOverrides: {
+          skills: thread.skillOverrides,
+          mcp: thread.mcpOverrides,
+          revision: thread.extensionOverridesRevision,
+        },
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: desiredRuntimeMode,
       });
@@ -738,6 +747,10 @@ const make = Effect.gen(function* () {
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
+    readonly selectedSkills?: Extract<
+      ProviderIntentEvent,
+      { type: "thread.turn-start-requested" }
+    >["payload"]["selectedSkills"];
     readonly createdAt: string;
   }) {
     const thread = yield* resolveThread(input.threadId);
@@ -789,6 +802,7 @@ const make = Effect.gen(function* () {
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+      ...(input.selectedSkills !== undefined ? { selectedSkills: input.selectedSkills } : {}),
     };
   });
 
@@ -1169,6 +1183,9 @@ const make = Effect.gen(function* () {
         ? { modelSelection: event.payload.modelSelection }
         : {}),
       interactionMode: event.payload.interactionMode,
+      ...(event.payload.selectedSkills !== undefined
+        ? { selectedSkills: event.payload.selectedSkills }
+        : {}),
       createdAt: event.payload.createdAt,
     }).pipe(
       Effect.map(Option.some),
@@ -1326,6 +1343,130 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const reconcileThreadExtensions = Effect.fn("reconcileThreadExtensions")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly createdAt: string;
+    readonly defer: boolean;
+  }) {
+    const thread = yield* resolveThread(input.threadId);
+    if (!thread) {
+      return;
+    }
+    const project = yield* resolveProject(thread.projectId);
+    const cwd = resolveThreadWorkspaceCwd({
+      thread,
+      projects: project ? [project] : [],
+    });
+    if (!cwd) {
+      return yield* new ProviderAdapterRequestError({
+        provider: providerErrorLabel(String(thread.modelSelection.instanceId)),
+        method: "extensions.reconcile",
+        detail: `Thread '${thread.id}' has no resolvable workspace cwd.`,
+      });
+    }
+    const activeSession = yield* providerService
+      .listSessions()
+      .pipe(Effect.map((sessions) => sessions.find((session) => session.threadId === thread.id)));
+    const providerInstanceId =
+      activeSession?.providerInstanceId ??
+      thread.session?.providerInstanceId ??
+      thread.modelSelection.instanceId;
+    const modelSelection =
+      threadModelSelections.get(thread.id) ??
+      (activeSession?.model
+        ? { ...thread.modelSelection, model: activeSession.model }
+        : thread.modelSelection);
+    const reconcileExtensions = providerService.reconcileExtensions;
+    if (!reconcileExtensions) {
+      return yield* new ProviderAdapterRequestError({
+        provider: providerErrorLabel(String(providerInstanceId)),
+        method: "extensions.reconcile",
+        detail: `Provider instance '${providerInstanceId}' does not expose extension reconciliation.`,
+      });
+    }
+    const result = yield* reconcileExtensions({
+      providerInstanceId,
+      threadId: thread.id,
+      cwd,
+      runtimeMode: thread.runtimeMode,
+      modelSelection,
+      ...(activeSession?.resumeCursor !== undefined
+        ? { resumeCursor: activeSession.resumeCursor }
+        : {}),
+      skillOverrides: thread.skillOverrides,
+      mcpOverrides: thread.mcpOverrides,
+      extensionOverridesRevision: thread.extensionOverridesRevision,
+      ...(input.defer ? { defer: true } : {}),
+    });
+    if (result.session) {
+      yield* setThreadSession({
+        threadId: thread.id,
+        session: {
+          threadId: thread.id,
+          status: mapProviderSessionStatusToOrchestrationStatus(result.session.status),
+          providerName: result.session.provider,
+          providerInstanceId,
+          runtimeMode: result.session.runtimeMode,
+          activeTurnId: null,
+          lastError: result.session.lastError ?? null,
+          updatedAt: result.session.updatedAt,
+        },
+        createdAt: input.createdAt,
+      });
+    }
+  });
+
+  const processExtensionOverrideSet = Effect.fn("processExtensionOverrideSet")(function* (
+    event: Extract<
+      ProviderIntentEvent,
+      { type: "thread.skill-override-set" | "thread.mcp-override-set" }
+    >,
+  ) {
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread) {
+      return;
+    }
+    const turnActive =
+      thread.session !== null &&
+      (thread.session.status === "starting" ||
+        thread.session.status === "running" ||
+        thread.session.activeTurnId !== null);
+    if (turnActive) {
+      pendingExtensionReconciliations.set(thread.id, thread.extensionOverridesRevision);
+    }
+    yield* reconcileThreadExtensions({
+      threadId: thread.id,
+      createdAt: event.occurredAt,
+      defer: turnActive,
+    });
+    if (!turnActive) {
+      pendingExtensionReconciliations.delete(thread.id);
+    }
+  });
+
+  const processPendingExtensionReconciliation = Effect.fn("processPendingExtensionReconciliation")(
+    function* (event: Extract<ProviderIntentEvent, { type: "thread.session-set" }>) {
+      const pendingRevision = pendingExtensionReconciliations.get(event.payload.threadId);
+      if (pendingRevision === undefined) {
+        return;
+      }
+      if (
+        event.payload.session.activeTurnId !== null ||
+        event.payload.session.status === "starting" ||
+        event.payload.session.status === "running" ||
+        event.payload.session.status === "stopped"
+      ) {
+        return;
+      }
+      yield* reconcileThreadExtensions({
+        threadId: event.payload.threadId,
+        createdAt: event.occurredAt,
+        defer: false,
+      });
+      pendingExtensionReconciliations.delete(event.payload.threadId);
+    },
+  );
+
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (
     event: ProviderIntentEvent,
   ) {
@@ -1354,6 +1495,13 @@ const make = Effect.gen(function* () {
         );
         return;
       }
+      case "thread.skill-override-set":
+      case "thread.mcp-override-set":
+        yield* processExtensionOverrideSet(event);
+        return;
+      case "thread.session-set":
+        yield* processPendingExtensionReconciliation(event);
+        return;
       case "thread.turn-start-requested":
         yield* processTurnStartRequested(event);
         return;
@@ -1403,6 +1551,9 @@ const make = Effect.gen(function* () {
       if (
         (event.type === "thread.meta-updated" && event.payload.regenerateTitle === true) ||
         event.type === "thread.runtime-mode-set" ||
+        event.type === "thread.skill-override-set" ||
+        event.type === "thread.mcp-override-set" ||
+        event.type === "thread.session-set" ||
         event.type === "thread.turn-start-requested" ||
         event.type === "thread.turn-interrupt-requested" ||
         event.type === "thread.approval-response-requested" ||

@@ -8,6 +8,7 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderDriverKind,
+  ProviderExtensionItemId,
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -238,6 +239,17 @@ describe("ProviderCommandReactor", () => {
     const interruptTurn = vi.fn((_: unknown) => Effect.void);
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
+    const reconcileExtensions = vi.fn<NonNullable<ProviderServiceShape["reconcileExtensions"]>>(
+      (input) =>
+        Effect.succeed({
+          state: input.defer
+            ? {
+                appliedOverrideRevision: Math.max(0, input.extensionOverridesRevision - 1),
+                pendingOverrideRevision: input.extensionOverridesRevision,
+              }
+            : { appliedOverrideRevision: input.extensionOverridesRevision },
+        }),
+    );
     const stopSession = vi.fn((input: unknown) =>
       Effect.sync(() => {
         const threadId =
@@ -339,6 +351,7 @@ describe("ProviderCommandReactor", () => {
           },
         });
       },
+      reconcileExtensions,
       rollbackConversation: () => unsupported(),
       get streamEvents() {
         return Stream.fromPubSub(runtimeEventPubSub);
@@ -497,6 +510,7 @@ describe("ProviderCommandReactor", () => {
       interruptTurn,
       respondToRequest,
       respondToUserInput,
+      reconcileExtensions,
       stopSession,
       renameBranch,
       refreshStatus,
@@ -529,6 +543,13 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        selectedSkills: [
+          {
+            id: ProviderExtensionItemId.make("/skills/review/SKILL.md"),
+            name: "review",
+            path: "/skills/review/SKILL.md",
+          },
+        ],
         createdAt: now,
       }),
     );
@@ -543,6 +564,20 @@ describe("ProviderCommandReactor", () => {
         model: "gpt-5-codex",
       },
       runtimeMode: "approval-required",
+      extensionOverrides: {
+        skills: {},
+        mcp: {},
+        revision: 0,
+      },
+    });
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      selectedSkills: [
+        {
+          id: "/skills/review/SKILL.md",
+          name: "review",
+          path: "/skills/review/SKILL.md",
+        },
+      ],
     });
 
     const readModel = await harness.readModel();
@@ -550,6 +585,94 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("defers and coalesces active-turn extension overrides until the session drains", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-extension-session-running"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-extension"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.skill-override.set",
+        commandId: CommandId.make("cmd-extension-skill-disable"),
+        threadId,
+        skillId: ProviderExtensionItemId.make("/skills/review/SKILL.md"),
+        state: "disabled",
+        expectedRevision: 0,
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.mcp-override.set",
+        commandId: CommandId.make("cmd-extension-mcp-disable"),
+        threadId,
+        mcpServerId: ProviderExtensionItemId.make("postgres"),
+        state: "disabled",
+        expectedRevision: 1,
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.reconcileExtensions.mock.calls.length === 2);
+    expect(harness.reconcileExtensions.mock.calls.every(([input]) => input.defer === true)).toBe(
+      true,
+    );
+    expect(harness.reconcileExtensions.mock.calls.at(-1)?.[0]).toMatchObject({
+      extensionOverridesRevision: 2,
+      skillOverrides: { "/skills/review/SKILL.md": "disabled" },
+      mcpOverrides: { postgres: "disabled" },
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-extension-session-ready"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.reconcileExtensions.mock.calls.length === 3);
+    const applications = harness.reconcileExtensions.mock.calls.filter(
+      ([input]) => input.defer !== true,
+    );
+    expect(applications).toHaveLength(1);
+    expect(applications[0]?.[0]).toMatchObject({
+      extensionOverridesRevision: 2,
+      skillOverrides: { "/skills/review/SKILL.md": "disabled" },
+      mcpOverrides: { postgres: "disabled" },
+    });
+    expect(harness.startSession).not.toHaveBeenCalled();
   });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
