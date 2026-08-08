@@ -906,6 +906,80 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.skill-override.set": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' is deleted and cannot handle command '${command.type}'.`,
+        });
+      }
+      if (command.expectedRevision !== thread.extensionOverridesRevision) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' extension override revision is ${thread.extensionOverridesRevision}; expected ${command.expectedRevision}.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.skill-override-set",
+        payload: {
+          threadId: command.threadId,
+          skillId: command.skillId,
+          state: command.state,
+          extensionOverridesRevision: thread.extensionOverridesRevision + 1,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "thread.mcp-override.set": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' is deleted and cannot handle command '${command.type}'.`,
+        });
+      }
+      if (command.expectedRevision !== thread.extensionOverridesRevision) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' extension override revision is ${thread.extensionOverridesRevision}; expected ${command.expectedRevision}.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.mcp-override-set",
+        payload: {
+          threadId: command.threadId,
+          mcpServerId: command.mcpServerId,
+          state: command.state,
+          extensionOverridesRevision: thread.extensionOverridesRevision + 1,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
     case "thread.turn.start": {
       const targetThread = yield* requireThread({
         readModel,

@@ -19,6 +19,8 @@ import {
   ThreadCreatedPayload,
   ThreadDeletedPayload,
   ThreadInteractionModeSetPayload,
+  ThreadSkillOverrideSetPayload,
+  ThreadMcpOverrideSetPayload,
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
   ThreadRuntimeModeSetPayload,
@@ -74,6 +76,20 @@ function updateThread(
   patch: ThreadPatch,
 ): OrchestrationThread[] {
   return threads.map((thread) => (thread.id === threadId ? { ...thread, ...patch } : thread));
+}
+
+function updateExtensionOverride(
+  overrides: Readonly<Record<string, "enabled" | "disabled">>,
+  itemId: string,
+  state: "inherit" | "enabled" | "disabled",
+): Record<string, "enabled" | "disabled"> {
+  const next = { ...overrides };
+  if (state === "inherit") {
+    delete next[itemId];
+  } else {
+    next[itemId] = state;
+  }
+  return next;
 }
 
 function decodeForEvent<A>(
@@ -478,6 +494,51 @@ export function projectEvent(
             updatedAt: payload.updatedAt,
           }),
         })),
+      );
+
+    case "thread.skill-override-set":
+      return decodeForEvent(
+        ThreadSkillOverrideSetPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              skillOverrides: updateExtensionOverride(
+                thread.skillOverrides,
+                payload.skillId,
+                payload.state,
+              ),
+              extensionOverridesRevision: payload.extensionOverridesRevision,
+              updatedAt: payload.updatedAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.mcp-override-set":
+      return decodeForEvent(ThreadMcpOverrideSetPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              mcpOverrides: updateExtensionOverride(
+                thread.mcpOverrides,
+                payload.mcpServerId,
+                payload.state,
+              ),
+              extensionOverridesRevision: payload.extensionOverridesRevision,
+              updatedAt: payload.updatedAt,
+            }),
+          };
+        }),
       );
 
     case "thread.message-sent":

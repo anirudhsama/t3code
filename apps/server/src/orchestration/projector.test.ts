@@ -93,6 +93,9 @@ describe("orchestration projector", () => {
         settledAt: null,
         snoozedUntil: null,
         snoozedAt: null,
+        skillOverrides: {},
+        mcpOverrides: {},
+        extensionOverridesRevision: 0,
         deletedAt: null,
         messages: [],
         proposedPlans: [],
@@ -101,6 +104,101 @@ describe("orchestration projector", () => {
         session: null,
       },
     ]);
+  });
+
+  it("projects sparse extension overrides and preserves unrelated stale keys", async () => {
+    const now = "2026-01-01T00:00:00.000Z";
+    const created = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(now),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-overrides",
+          occurredAt: now,
+          commandId: "cmd-create-overrides",
+          payload: {
+            threadId: "thread-overrides",
+            projectId: "project-1",
+            title: "overrides",
+            modelSelection: { provider: "codex", model: "gpt-5-codex" },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+
+    const withSkill = await Effect.runPromise(
+      projectEvent(
+        created,
+        makeEvent({
+          sequence: 2,
+          type: "thread.skill-override-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-overrides",
+          occurredAt: now,
+          commandId: "cmd-skill-overrides",
+          payload: {
+            threadId: "thread-overrides",
+            skillId: "/missing-plugin/SKILL.md",
+            state: "disabled",
+            extensionOverridesRevision: 1,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+    const withMcp = await Effect.runPromise(
+      projectEvent(
+        withSkill,
+        makeEvent({
+          sequence: 3,
+          type: "thread.mcp-override-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-overrides",
+          occurredAt: now,
+          commandId: "cmd-mcp-overrides",
+          payload: {
+            threadId: "thread-overrides",
+            mcpServerId: "temporarily-missing-mcp",
+            state: "enabled",
+            extensionOverridesRevision: 2,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+    const inherited = await Effect.runPromise(
+      projectEvent(
+        withMcp,
+        makeEvent({
+          sequence: 4,
+          type: "thread.skill-override-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-overrides",
+          occurredAt: now,
+          commandId: "cmd-skill-inherit",
+          payload: {
+            threadId: "thread-overrides",
+            skillId: "/missing-plugin/SKILL.md",
+            state: "inherit",
+            extensionOverridesRevision: 3,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+
+    expect(inherited.threads[0]?.skillOverrides).toEqual({});
+    expect(inherited.threads[0]?.mcpOverrides).toEqual({
+      "temporarily-missing-mcp": "enabled",
+    });
+    expect(inherited.threads[0]?.extensionOverridesRevision).toBe(3);
   });
 
   it("fails when event payload cannot be decoded by runtime schema", async () => {
