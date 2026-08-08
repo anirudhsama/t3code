@@ -144,6 +144,7 @@ interface ThreadNavigationSidebarProps {
   readonly onOpenSettings: () => void;
   readonly onOpenEnvironmentSettings: () => void;
   readonly onNewThreadInProject: (project: EnvironmentProject) => void;
+  readonly onNewThreadFromThread: (thread: EnvironmentThreadShell) => void;
   readonly onSearchQueryChange: (query: string) => void;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
   readonly onRequestVisibility: () => void;
@@ -213,6 +214,7 @@ function ThreadNavigationSidebarPane(
     pinThread,
     unpinThread,
     movePinnedThread,
+    renameThread,
     regenerateThreadTitle,
   } = useThreadListActions();
   const threadListV2Enabled = useThreadListV2Enabled();
@@ -968,6 +970,8 @@ function ThreadNavigationSidebarPane(
               onSelectThread={handleSelectThread}
               onDeleteThread={confirmDeleteThread}
               onArchiveThread={archiveThread}
+              onNewThreadFromThread={props.onNewThreadFromThread}
+              onRenameThread={renameThread}
               onRegenerateThreadTitle={regenerateThreadTitle}
               titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
               settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
@@ -1087,6 +1091,8 @@ function ThreadNavigationSidebarPane(
               fullSwipeWidth={props.width - 20}
               onArchiveThread={archiveThread}
               onDeleteThread={confirmDeleteThread}
+              onNewThreadFromThread={props.onNewThreadFromThread}
+              onRenameThread={renameThread}
               onRegenerateThreadTitle={regenerateThreadTitle}
               titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
               onSelectThread={handleSelectThread}
@@ -1127,10 +1133,13 @@ function ThreadNavigationSidebarPane(
       projectTitleByProjectKey,
       regenerateThreadTitle,
       props.onNewThreadInProject,
+      props.onNewThreadFromThread,
       props.searchQuery,
       props.selectedThreadKey,
       props.width,
       savedConnectionsById,
+      regenerateThreadTitle,
+      renameThread,
       serverConfigs,
       threadSearchMatchByKey,
       titleRegenerationEnvironmentIds,
