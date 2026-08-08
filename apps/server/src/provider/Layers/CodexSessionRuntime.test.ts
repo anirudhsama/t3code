@@ -19,6 +19,7 @@ import {
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   openCodexThread,
+  requestAllCodexMcpServerStatus,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
@@ -466,6 +467,61 @@ describe("openCodexThread", () => {
 
       NodeAssert.ok(isCodexAppServerRequestError(error));
       NodeAssert.equal(error.errorMessage, "timed out waiting for server");
+    }),
+  );
+});
+
+describe("requestAllCodexMcpServerStatus", () => {
+  it.effect("always scopes status pages to the provider thread", () =>
+    Effect.gen(function* () {
+      const calls: Array<CodexRpc.ClientRequestParamsByMethod["mcpServerStatus/list"]> = [];
+      const client = {
+        request: (
+          _method: "mcpServerStatus/list",
+          payload: CodexRpc.ClientRequestParamsByMethod["mcpServerStatus/list"],
+        ) => {
+          calls.push(payload);
+          return Effect.succeed({
+            data: [],
+            nextCursor: calls.length === 1 ? "page-2" : null,
+          });
+        },
+      };
+
+      yield* requestAllCodexMcpServerStatus({
+        client,
+        providerThreadId: "provider-thread-1",
+      });
+
+      NodeAssert.deepStrictEqual(calls, [
+        {
+          threadId: "provider-thread-1",
+          detail: "toolsAndAuthOnly",
+        },
+        {
+          threadId: "provider-thread-1",
+          detail: "toolsAndAuthOnly",
+          cursor: "page-2",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("does not fall back to process-global status before a thread is open", () =>
+    Effect.gen(function* () {
+      let requested = false;
+      const result = yield* requestAllCodexMcpServerStatus({
+        client: {
+          request: () => {
+            requested = true;
+            return Effect.succeed({ data: [], nextCursor: null });
+          },
+        },
+        providerThreadId: undefined,
+      });
+
+      NodeAssert.equal(requested, false);
+      NodeAssert.deepStrictEqual(result, { data: [], nextCursor: null });
     }),
   );
 });

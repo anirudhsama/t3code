@@ -120,6 +120,14 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly interactionMode?: ProviderInteractionMode;
 }
 
+export interface CodexSessionRuntimeStartInput {
+  readonly cwd: string;
+  readonly runtimeMode: RuntimeMode;
+  readonly model?: string;
+  readonly serviceTier?: CodexServiceTier | undefined;
+  readonly resumeCursor?: CodexResumeCursor;
+}
+
 export interface CodexThreadTurnSnapshot {
   readonly id: TurnId;
   readonly items: ReadonlyArray<CodexThreadItem>;
@@ -131,7 +139,24 @@ export interface CodexThreadSnapshot {
 }
 
 export interface CodexSessionRuntimeShape {
-  readonly start: () => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
+  readonly initialize: Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly start: (
+    input?: CodexSessionRuntimeStartInput,
+  ) => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
+  readonly listSkills: (input: {
+    readonly cwd: string;
+    readonly forceReload?: boolean;
+  }) => Effect.Effect<EffectCodexSchema.V2SkillsListResponse, CodexSessionRuntimeError>;
+  readonly readMcpConfig: (
+    cwd: string,
+  ) => Effect.Effect<EffectCodexSchema.V2ConfigReadResponse, CodexSessionRuntimeError>;
+  readonly listMcpServerStatus: Effect.Effect<
+    EffectCodexSchema.V2ListMcpServerStatusResponse,
+    CodexSessionRuntimeError
+  >;
+  readonly beginMcpAuth: (
+    name: string,
+  ) => Effect.Effect<EffectCodexSchema.V2McpServerOauthLoginResponse, CodexSessionRuntimeError>;
   readonly getSession: Effect.Effect<ProviderSession>;
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
@@ -453,6 +478,43 @@ interface CodexThreadOpenClient {
     payload: CodexRpc.ClientRequestParamsByMethod[M],
   ) => Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError>;
 }
+
+interface CodexMcpStatusClient {
+  readonly request: (
+    method: "mcpServerStatus/list",
+    payload: CodexRpc.ClientRequestParamsByMethod["mcpServerStatus/list"],
+  ) => Effect.Effect<
+    CodexRpc.ClientRequestResponsesByMethod["mcpServerStatus/list"],
+    CodexErrors.CodexAppServerError
+  >;
+}
+
+export const requestAllCodexMcpServerStatus = Effect.fn("requestAllCodexMcpServerStatus")(
+  function* (input: {
+    readonly client: CodexMcpStatusClient;
+    readonly providerThreadId: string | undefined;
+  }) {
+    if (!input.providerThreadId) {
+      return {
+        data: [],
+        nextCursor: null,
+      } satisfies EffectCodexSchema.V2ListMcpServerStatusResponse;
+    }
+
+    const data: Array<EffectCodexSchema.V2ListMcpServerStatusResponse__McpServerStatus> = [];
+    let cursor: string | null | undefined;
+    do {
+      const response = yield* input.client.request("mcpServerStatus/list", {
+        threadId: input.providerThreadId,
+        detail: "toolsAndAuthOnly",
+        ...(cursor ? { cursor } : {}),
+      });
+      data.push(...response.data);
+      cursor = response.nextCursor;
+    } while (cursor);
+    return { data, nextCursor: null };
+  },
+);
 
 export const openCodexThread = (input: {
   readonly client: CodexThreadOpenClient;
@@ -1681,27 +1743,40 @@ export const makeCodexSessionRuntime = (
       Effect.forkIn(runtimeScope),
     );
 
-    const start = Effect.fn("CodexSessionRuntime.start")(function* () {
-      yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
-      yield* client.request("initialize", buildCodexInitializeParams());
-      yield* client.notify("initialized", undefined);
+    const initialize = yield* Effect.cached(
+      Effect.gen(function* () {
+        yield* client.request("initialize", buildCodexInitializeParams());
+        yield* client.notify("initialized", undefined);
+      }),
+    );
 
-      const requestedModel = normalizeCodexModelSlug(options.model);
+    const start = Effect.fn("CodexSessionRuntime.start")(function* (
+      startInput?: CodexSessionRuntimeStartInput,
+    ) {
+      yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
+      yield* initialize;
+
+      const cwd = startInput?.cwd ?? options.cwd;
+      const runtimeMode = startInput?.runtimeMode ?? options.runtimeMode;
+      const requestedModel = normalizeCodexModelSlug(startInput?.model ?? options.model);
+      const serviceTier = startInput?.serviceTier ?? options.serviceTier;
+      const resumeCursor = startInput?.resumeCursor ?? options.resumeCursor;
 
       const opened = yield* openCodexThread({
         client,
         threadId: options.threadId,
-        runtimeMode: options.runtimeMode,
-        cwd: options.cwd,
+        runtimeMode,
+        cwd,
         requestedModel,
-        serviceTier: options.serviceTier,
-        resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        serviceTier,
+        resumeThreadId: readResumeCursorThreadId(resumeCursor),
       });
 
       const providerThreadId = opened.thread.id;
       const session = {
         ...(yield* Ref.get(sessionRef)),
         status: "ready",
+        runtimeMode,
         cwd: opened.cwd,
         model: opened.model,
         resumeCursor: { threadId: providerThreadId },
@@ -1744,7 +1819,40 @@ export const makeCodexSessionRuntime = (
     });
 
     return {
+      initialize,
       start,
+      listSkills: (input) =>
+        initialize.pipe(
+          Effect.andThen(
+            client.request("skills/list", {
+              cwds: [input.cwd],
+              ...(input.forceReload ? { forceReload: true } : {}),
+            }),
+          ),
+        ),
+      readMcpConfig: (cwd) =>
+        initialize.pipe(
+          Effect.andThen(
+            client.request("config/read", {
+              cwd,
+              includeLayers: true,
+            }),
+          ),
+        ),
+      listMcpServerStatus: Effect.gen(function* () {
+        yield* initialize;
+        const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+        return yield* requestAllCodexMcpServerStatus({ client, providerThreadId });
+      }),
+      beginMcpAuth: (name) =>
+        Effect.gen(function* () {
+          yield* initialize;
+          const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+          return yield* client.request("mcpServer/oauth/login", {
+            name,
+            ...(providerThreadId ? { threadId: providerThreadId } : {}),
+          });
+        }),
       getSession: Ref.get(sessionRef),
       sendTurn: (input) =>
         Effect.gen(function* () {

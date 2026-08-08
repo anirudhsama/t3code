@@ -5,6 +5,7 @@
  * one `ProviderInstance` bundling:
  *   - `snapshot`   — the live `ServerProviderShape` for this instance;
  *   - `adapter`    — the Codex session/turn/approval runtime;
+ *   - `extensions` — contextual skill and MCP inventory on that same runtime;
  *   - `textGeneration` — commit/PR/branch/title generation via `codex exec`.
  *
  * Each call to `create()` captures the `codexConfig` argument in closures
@@ -207,6 +208,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         enabled,
         snapshot,
         adapter,
+        extensions: adapter.extensions,
         textGeneration,
       } satisfies ProviderInstance;
     }),
