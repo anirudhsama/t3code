@@ -5,7 +5,7 @@ import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
 import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
-import { type ServerProviderSkill } from "@t3tools/contracts";
+import type { ProviderSelectedSkill, ProviderSkill } from "@t3tools/contracts";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import {
   $applyNodeReplacement,
@@ -108,7 +108,7 @@ type SerializedComposerMentionNode = Spread<
   SerializedLexicalNode
 >;
 
-type SerializedComposerSkillNode = Spread<
+type SerializedComposerSkillNodeV1 = Spread<
   {
     skillName: string;
     skillLabel?: string;
@@ -118,6 +118,21 @@ type SerializedComposerSkillNode = Spread<
   },
   SerializedLexicalNode
 >;
+
+type SerializedComposerSkillNodeV2 = Spread<
+  {
+    skillId: string;
+    skillName: string;
+    skillPath?: string;
+    skillLabel?: string;
+    skillDescription?: string;
+    type: "composer-skill";
+    version: 2;
+  },
+  SerializedLexicalNode
+>;
+
+type SerializedComposerSkillNode = SerializedComposerSkillNodeV1 | SerializedComposerSkillNodeV2;
 
 type SerializedComposerTerminalContextNode = Spread<
   {
@@ -213,43 +228,62 @@ function $createComposerMentionNode(path: string): ComposerMentionNode {
   return $applyNodeReplacement(new ComposerMentionNode(path));
 }
 
-function resolveSkillDescription(
-  skill: Pick<ServerProviderSkill, "shortDescription" | "description">,
-): string | null {
-  const shortDescription = skill.shortDescription?.trim();
-  if (shortDescription) {
-    return shortDescription;
-  }
+function resolveSkillDescription(skill: Pick<ProviderSkill, "description">): string | null {
   const description = skill.description?.trim();
   return description || null;
 }
 
 type ComposerSkillMetadata = {
+  id: ProviderSkill["id"];
+  name: string;
+  path: string | null;
   label: string;
   description: string | null;
+  effectiveEnabled: boolean;
 };
 
-function skillMetadataByName(
-  skills: ReadonlyArray<ServerProviderSkill>,
-): ReadonlyMap<string, ComposerSkillMetadata> {
-  return new Map(
-    skills.map((skill) => [
-      skill.name,
-      {
-        label: formatProviderSkillDisplayName(skill),
-        description: resolveSkillDescription(skill),
-      },
-    ]),
-  );
+export type ComposerSkillCatalog = {
+  byId: ReadonlyMap<string, ComposerSkillMetadata>;
+  byName: ReadonlyMap<string, ReadonlyArray<ComposerSkillMetadata>>;
+};
+
+export function buildComposerSkillCatalog(
+  skills: ReadonlyArray<ProviderSkill>,
+): ComposerSkillCatalog {
+  const byId = new Map<string, ComposerSkillMetadata>();
+  const byName = new Map<string, ComposerSkillMetadata[]>();
+  for (const skill of skills) {
+    const metadata = {
+      id: skill.id,
+      name: skill.name,
+      path: skill.path ?? null,
+      label: skill.displayName?.trim() || formatProviderSkillDisplayName(skill),
+      description: resolveSkillDescription(skill),
+      effectiveEnabled: skill.effectiveEnabled,
+    } satisfies ComposerSkillMetadata;
+    byId.set(skill.id, metadata);
+    byName.set(skill.name, [...(byName.get(skill.name) ?? []), metadata]);
+  }
+  return { byId, byName };
 }
 
-function ComposerSkillDecorator(props: { skillLabel: string; skillDescription: string | null }) {
+function ComposerSkillDecorator(props: {
+  skillLabel: string;
+  skillDescription: string | null;
+  invalidReason: string | null;
+}) {
   const chip = (
     <span
-      className={COMPOSER_INLINE_SKILL_CHIP_CLASS_NAME}
+      className={cn(
+        COMPOSER_INLINE_SKILL_CHIP_CLASS_NAME,
+        props.invalidReason &&
+          "bg-destructive/10 text-destructive-foreground ring-1 ring-destructive/35",
+      )}
       contentEditable={false}
       spellCheck={false}
       data-composer-skill-chip="true"
+      data-composer-skill-invalid={props.invalidReason ? "true" : undefined}
+      aria-invalid={props.invalidReason ? "true" : undefined}
     >
       <span
         aria-hidden="true"
@@ -260,7 +294,7 @@ function ComposerSkillDecorator(props: { skillLabel: string; skillDescription: s
     </span>
   );
 
-  if (!props.skillDescription) {
+  if (!props.skillDescription && !props.invalidReason) {
     return chip;
   }
 
@@ -268,16 +302,19 @@ function ComposerSkillDecorator(props: { skillLabel: string; skillDescription: s
     <Tooltip>
       <TooltipTrigger render={chip} />
       <TooltipPopup side="top" className="max-w-120 whitespace-normal leading-tight">
-        {props.skillDescription}
+        {props.invalidReason ?? props.skillDescription}
       </TooltipPopup>
     </Tooltip>
   );
 }
 
-class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
+export class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
+  __skillId: ProviderSkill["id"] | null;
   __skillName: string;
+  __skillPath: string | null;
   __skillLabel: string;
   __skillDescription: string | null;
+  __invalidReason: string | null;
 
   static override getType(): string {
     return "composer-skill";
@@ -285,35 +322,59 @@ class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
 
   static override clone(node: ComposerSkillNode): ComposerSkillNode {
     return new ComposerSkillNode(
+      node.__skillId,
       node.__skillName,
+      node.__skillPath,
       node.__skillLabel,
       node.__skillDescription,
+      node.__invalidReason,
       node.__key,
     );
   }
 
   static override importJSON(serializedNode: SerializedComposerSkillNode): ComposerSkillNode {
     return $createComposerSkillNode(
+      serializedNode.version === 2 ? (serializedNode.skillId as ProviderSkill["id"]) : null,
       serializedNode.skillName,
+      serializedNode.version === 2 ? (serializedNode.skillPath ?? null) : null,
       serializedNode.skillLabel ?? serializedNode.skillName,
       serializedNode.skillDescription ?? null,
+      null,
     ).updateFromJSON(serializedNode);
   }
 
   constructor(
+    skillId: ProviderSkill["id"] | null,
     skillName: string,
+    skillPath: string | null,
     skillLabel: string,
     skillDescription: string | null,
+    invalidReason: string | null,
     key?: NodeKey,
   ) {
     super(key);
     const normalizedSkillName = skillName.startsWith("$") ? skillName.slice(1) : skillName;
+    this.__skillId = skillId;
     this.__skillName = normalizedSkillName;
+    this.__skillPath = skillPath;
     this.__skillLabel = skillLabel;
     this.__skillDescription = skillDescription;
+    this.__invalidReason = invalidReason;
   }
 
   override exportJSON(): SerializedComposerSkillNode {
+    if (this.__skillId) {
+      return {
+        ...super.exportJSON(),
+        skillId: this.__skillId,
+        skillName: this.__skillName,
+        ...(this.__skillPath ? { skillPath: this.__skillPath } : {}),
+        skillLabel: this.__skillLabel,
+        ...(this.__skillDescription ? { skillDescription: this.__skillDescription } : {}),
+        type: "composer-skill",
+        version: 2,
+      };
+    }
     return {
       ...super.exportJSON(),
       skillName: this.__skillName,
@@ -347,17 +408,77 @@ class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
       <ComposerSkillDecorator
         skillLabel={this.__skillLabel}
         skillDescription={this.__skillDescription}
+        invalidReason={this.__invalidReason}
       />
     );
+  }
+
+  syncFromCatalog(catalog: ComposerSkillCatalog): void {
+    const exact = this.__skillId ? catalog.byId.get(this.__skillId) : undefined;
+    const legacyMatches = this.__skillId ? [] : (catalog.byName.get(this.__skillName) ?? []);
+    const metadata = exact ?? (legacyMatches.length === 1 ? legacyMatches[0] : undefined);
+    const identityMatches = Boolean(
+      metadata &&
+      metadata.name === this.__skillName &&
+      (!this.__skillPath || metadata.path === this.__skillPath),
+    );
+    let invalidReason: string | null = null;
+    if (!metadata) {
+      invalidReason =
+        legacyMatches.length > 1
+          ? "This legacy skill chip is ambiguous. Remove it and select the exact skill again."
+          : "This skill is no longer available. Remove it or re-enable it before sending.";
+    } else if (
+      metadata.name !== this.__skillName ||
+      (this.__skillPath && metadata.path !== this.__skillPath)
+    ) {
+      invalidReason = "This skill's identity changed. Remove it and select the exact skill again.";
+    } else if (!metadata.effectiveEnabled) {
+      invalidReason =
+        "This skill is disabled for future turns. Re-enable it or remove the chip before sending.";
+    }
+    const writable = this.getWritable();
+    if (metadata && (!this.__skillId || identityMatches)) {
+      writable.__skillId = metadata.id;
+      writable.__skillPath = metadata.path;
+      writable.__skillLabel = metadata.label;
+      writable.__skillDescription = metadata.description;
+    }
+    writable.__invalidReason = invalidReason;
   }
 }
 
 function $createComposerSkillNode(
+  skillId: ProviderSkill["id"] | null,
   skillName: string,
+  skillPath: string | null,
   skillLabel: string,
   skillDescription: string | null,
+  invalidReason: string | null,
 ): ComposerSkillNode {
-  return $applyNodeReplacement(new ComposerSkillNode(skillName, skillLabel, skillDescription));
+  return $applyNodeReplacement(
+    new ComposerSkillNode(
+      skillId,
+      skillName,
+      skillPath,
+      skillLabel,
+      skillDescription,
+      invalidReason,
+    ),
+  );
+}
+
+export function $createComposerSkillNodeForSkill(skill: ProviderSkill): ComposerSkillNode {
+  return $createComposerSkillNode(
+    skill.id,
+    skill.name,
+    skill.path ?? null,
+    skill.displayName?.trim() || formatProviderSkillDisplayName(skill),
+    resolveSkillDescription(skill),
+    skill.effectiveEnabled
+      ? null
+      : "This skill is disabled for future turns. Re-enable it or remove the chip before sending.",
+  );
 }
 
 function ComposerTerminalContextDecorator(props: { context: TerminalContextDraft }) {
@@ -458,17 +579,17 @@ function terminalContextSignature(contexts: ReadonlyArray<TerminalContextDraft>)
     .join("\u001e");
 }
 
-function skillSignature(skills: ReadonlyArray<ServerProviderSkill>): string {
+function skillSignature(skills: ReadonlyArray<ProviderSkill>): string {
   return skills
     .map((skill) =>
       [
         skill.name,
         skill.displayName ?? "",
-        skill.shortDescription ?? "",
         skill.description ?? "",
-        skill.path,
-        skill.scope ?? "",
-        skill.enabled ? "1" : "0",
+        skill.path ?? "",
+        skill.scope,
+        skill.id,
+        skill.effectiveEnabled ? "1" : "0",
       ].join("\u001f"),
     )
     .join("\u001e");
@@ -758,6 +879,71 @@ function $setSelectionRangeAtComposerOffsets(startOffset: number, endOffset: num
   $setSelection(selection);
 }
 
+function findSelectionPointAtExpandedOffset(
+  node: LexicalNode,
+  remainingRef: { value: number },
+): { key: string; offset: number; type: "text" | "element" } | null {
+  if (isComposerInlineTokenNode(node)) {
+    const parent = node.getParent();
+    if (!parent || !$isElementNode(parent)) return null;
+    const size = getComposerNodeExpandedTextLength(node);
+    const index = node.getIndexWithinParent();
+    if (remainingRef.value === 0) return { key: parent.getKey(), offset: index, type: "element" };
+    if (remainingRef.value <= size) {
+      return { key: parent.getKey(), offset: index + 1, type: "element" };
+    }
+    remainingRef.value -= size;
+    return null;
+  }
+  if ($isTextNode(node)) {
+    const size = node.getTextContentSize();
+    if (remainingRef.value <= size) {
+      return { key: node.getKey(), offset: remainingRef.value, type: "text" };
+    }
+    remainingRef.value -= size;
+    return null;
+  }
+  if ($isLineBreakNode(node)) {
+    const parent = node.getParent();
+    if (!parent) return null;
+    const index = node.getIndexWithinParent();
+    if (remainingRef.value === 0) return { key: parent.getKey(), offset: index, type: "element" };
+    if (remainingRef.value === 1)
+      return { key: parent.getKey(), offset: index + 1, type: "element" };
+    remainingRef.value -= 1;
+    return null;
+  }
+  if ($isElementNode(node)) {
+    const children = node.getChildren();
+    for (const child of children) {
+      const point = findSelectionPointAtExpandedOffset(child, remainingRef);
+      if (point) return point;
+    }
+    if (remainingRef.value === 0) {
+      return { key: node.getKey(), offset: children.length, type: "element" };
+    }
+  }
+  return null;
+}
+
+function $setSelectionRangeAtComposerExpandedOffsets(startOffset: number, endOffset: number): void {
+  const root = $getRoot();
+  const expandedLength = root.getTextContent().length;
+  const startRemaining = { value: Math.max(0, Math.min(startOffset, expandedLength)) };
+  const endRemaining = { value: Math.max(0, Math.min(endOffset, expandedLength)) };
+  const fallback = {
+    key: root.getKey(),
+    offset: root.getChildren().length,
+    type: "element" as const,
+  };
+  const anchor = findSelectionPointAtExpandedOffset(root, startRemaining) ?? fallback;
+  const focus = findSelectionPointAtExpandedOffset(root, endRemaining) ?? fallback;
+  const selection = $createRangeSelection();
+  selection.anchor.set(anchor.key, anchor.offset, anchor.type);
+  selection.focus.set(focus.key, focus.offset, focus.type);
+  $setSelection(selection);
+}
+
 function getSelectionRangeForExpandedComposerOffsets(selection: ReturnType<typeof $getSelection>): {
   start: number;
   end: number;
@@ -820,7 +1006,7 @@ function $appendTextWithLineBreaks(parent: ElementNode, text: string): void {
 function $setComposerEditorPrompt(
   prompt: string,
   terminalContexts: ReadonlyArray<TerminalContextDraft>,
-  skillMetadata: ReadonlyMap<string, ComposerSkillMetadata>,
+  catalog: ComposerSkillCatalog,
 ): void {
   const root = $getRoot();
   root.clear();
@@ -834,12 +1020,22 @@ function $setComposerEditorPrompt(
       continue;
     }
     if (segment.type === "skill") {
-      const metadata = skillMetadata.get(segment.name);
+      const matches = catalog.byName.get(segment.name) ?? [];
+      const metadata = matches.length === 1 ? matches[0] : undefined;
       paragraph.append(
         $createComposerSkillNode(
+          metadata?.id ?? null,
           segment.name,
+          metadata?.path ?? null,
           metadata?.label ?? formatProviderSkillDisplayName({ name: segment.name }),
           metadata?.description ?? null,
+          matches.length > 1
+            ? "This legacy skill chip is ambiguous. Remove it and select the exact skill again."
+            : metadata && !metadata.effectiveEnabled
+              ? "This skill is disabled for future turns. Re-enable it or remove the chip before sending."
+              : metadata
+                ? null
+                : "This skill is no longer available. Remove it or re-enable it before sending.",
         ),
       );
       continue;
@@ -864,6 +1060,36 @@ function collectTerminalContextIds(node: LexicalNode): string[] {
   return [];
 }
 
+function collectSkillNodes(node: LexicalNode): ComposerSkillNode[] {
+  if (node instanceof ComposerSkillNode) return [node];
+  if ($isElementNode(node)) return node.getChildren().flatMap(collectSkillNodes);
+  return [];
+}
+
+function readComposerSkillState(): {
+  selectedSkills: ProviderSelectedSkill[];
+  invalidSkillNames: string[];
+} {
+  const selectedSkills: ProviderSelectedSkill[] = [];
+  const invalidSkillNames: string[] = [];
+  for (const node of collectSkillNodes($getRoot())) {
+    if (!node.__skillId || node.__invalidReason) {
+      invalidSkillNames.push(node.__skillName);
+      continue;
+    }
+    selectedSkills.push({
+      id: node.__skillId,
+      name: node.__skillName,
+      ...(node.__skillPath ? { path: node.__skillPath } : {}),
+    });
+  }
+  return { selectedSkills, invalidSkillNames };
+}
+
+function $syncComposerSkillNodes(catalog: ComposerSkillCatalog): void {
+  for (const node of collectSkillNodes($getRoot())) node.syncFromCatalog(catalog);
+}
+
 export interface ComposerPromptEditorHandle {
   focus: () => void;
   focusAt: (cursor: number) => void;
@@ -873,14 +1099,27 @@ export interface ComposerPromptEditorHandle {
     cursor: number;
     expandedCursor: number;
     terminalContextIds: string[];
+    selectedSkills: ProviderSelectedSkill[];
+    invalidSkillNames: string[];
   };
+  replaceRangeWithSkill: (input: {
+    rangeStart: number;
+    rangeEnd: number;
+    skill: ProviderSkill;
+  }) => boolean;
+  replaceRangeWithText: (input: {
+    rangeStart: number;
+    rangeEnd: number;
+    text: string;
+    expectedText?: string;
+  }) => boolean;
 }
 
 interface ComposerPromptEditorProps {
   value: string;
   cursor: number;
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
-  skills: ReadonlyArray<ServerProviderSkill>;
+  skills: ReadonlyArray<ProviderSkill>;
   disabled: boolean;
   placeholder: string;
   className?: string;
@@ -1261,11 +1500,11 @@ function ComposerInlineTokenPastePlugin() {
 
 function ComposerSurroundSelectionPlugin(props: {
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
-  skills: ReadonlyArray<ServerProviderSkill>;
+  skills: ReadonlyArray<ProviderSkill>;
 }) {
   const [editor] = useLexicalComposerContext();
   const terminalContextsRef = useRef(props.terminalContexts);
-  const skillMetadataRef = useRef(skillMetadataByName(props.skills));
+  const skillCatalogRef = useRef(buildComposerSkillCatalog(props.skills));
   const pendingSurroundSelectionRef = useRef<{
     value: string;
     expandedStart: number;
@@ -1282,7 +1521,7 @@ function ComposerSurroundSelectionPlugin(props: {
   }, [props.terminalContexts]);
 
   useEffect(() => {
-    skillMetadataRef.current = skillMetadataByName(props.skills);
+    skillCatalogRef.current = buildComposerSkillCatalog(props.skills);
   }, [props.skills]);
 
   const applySurroundInsertion = useEffectEvent((inputData: string): boolean => {
@@ -1329,7 +1568,7 @@ function ComposerSurroundSelectionPlugin(props: {
         selectionSnapshot.expandedEnd,
       );
       const nextValue = `${selectionSnapshot.value.slice(0, selectionSnapshot.expandedStart)}${inputData}${selectedText}${surroundCloseSymbol}${selectionSnapshot.value.slice(selectionSnapshot.expandedEnd)}`;
-      $setComposerEditorPrompt(nextValue, terminalContextsRef.current, skillMetadataRef.current);
+      $setComposerEditorPrompt(nextValue, terminalContextsRef.current, skillCatalogRef.current);
       const selectionStart = collapseExpandedComposerCursor(
         nextValue,
         selectionSnapshot.expandedStart,
@@ -1546,12 +1785,14 @@ function ComposerPromptEditorInner({
   const terminalContextsSignatureRef = useRef(terminalContextsSignature);
   const skillsSignature = skillSignature(skills);
   const skillsSignatureRef = useRef(skillsSignature);
-  const skillMetadataRef = useRef(skillMetadataByName(skills));
+  const skillCatalogRef = useRef(buildComposerSkillCatalog(skills));
   const snapshotRef = useRef({
     value,
     cursor: initialCursor,
     expandedCursor: expandCollapsedComposerCursor(value, initialCursor),
     terminalContextIds: terminalContexts.map((context) => context.id),
+    selectedSkills: [] as ProviderSelectedSkill[],
+    invalidSkillNames: [] as string[],
   });
   const isApplyingControlledUpdateRef = useRef(false);
   const terminalContextActions = useMemo(
@@ -1564,7 +1805,7 @@ function ComposerPromptEditorInner({
   }, [onChange]);
 
   useLayoutEffect(() => {
-    skillMetadataRef.current = skillMetadataByName(skills);
+    skillCatalogRef.current = buildComposerSkillCatalog(skills);
   }, [skills]);
 
   useEffect(() => {
@@ -1590,6 +1831,8 @@ function ComposerPromptEditorInner({
       cursor: normalizedCursor,
       expandedCursor: expandCollapsedComposerCursor(value, normalizedCursor),
       terminalContextIds: terminalContexts.map((context) => context.id),
+      selectedSkills: previousSnapshot.selectedSkills,
+      invalidSkillNames: previousSnapshot.invalidSkillNames,
     };
     terminalContextsSignatureRef.current = terminalContextsSignature;
     skillsSignatureRef.current = skillsSignature;
@@ -1601,16 +1844,26 @@ function ComposerPromptEditorInner({
     }
 
     isApplyingControlledUpdateRef.current = true;
-    editor.update(() => {
-      const shouldRewriteEditorState =
-        previousSnapshot.value !== value || contextsChanged || skillsChanged;
-      if (shouldRewriteEditorState) {
-        $setComposerEditorPrompt(value, terminalContexts, skillMetadataRef.current);
-      }
-      if (shouldRewriteEditorState || isFocused) {
-        $setSelectionAtComposerOffset(normalizedCursor);
-      }
-    });
+    let nextSkillState = {
+      selectedSkills: previousSnapshot.selectedSkills,
+      invalidSkillNames: previousSnapshot.invalidSkillNames,
+    };
+    editor.update(
+      () => {
+        const shouldRewriteEditorState = previousSnapshot.value !== value || contextsChanged;
+        if (shouldRewriteEditorState) {
+          $setComposerEditorPrompt(value, terminalContexts, skillCatalogRef.current);
+        } else if (skillsChanged) {
+          $syncComposerSkillNodes(skillCatalogRef.current);
+        }
+        nextSkillState = readComposerSkillState();
+        if (shouldRewriteEditorState || isFocused) {
+          $setSelectionAtComposerOffset(normalizedCursor);
+        }
+      },
+      { discrete: true },
+    );
+    snapshotRef.current = { ...snapshotRef.current, ...nextSkillState };
     queueMicrotask(() => {
       isApplyingControlledUpdateRef.current = false;
     });
@@ -1630,6 +1883,8 @@ function ComposerPromptEditorInner({
         cursor: boundedCursor,
         expandedCursor: expandCollapsedComposerCursor(snapshotRef.current.value, boundedCursor),
         terminalContextIds: snapshotRef.current.terminalContextIds,
+        selectedSkills: snapshotRef.current.selectedSkills,
+        invalidSkillNames: snapshotRef.current.invalidSkillNames,
       };
       onChangeRef.current(
         snapshotRef.current.value,
@@ -1647,6 +1902,8 @@ function ComposerPromptEditorInner({
     cursor: number;
     expandedCursor: number;
     terminalContextIds: string[];
+    selectedSkills: ProviderSelectedSkill[];
+    invalidSkillNames: string[];
   } => {
     let snapshot = snapshotRef.current;
     editor.getEditorState().read(() => {
@@ -1665,11 +1922,13 @@ function ComposerPromptEditorInner({
         $readExpandedSelectionOffsetFromEditorState(fallbackExpandedCursor),
       );
       const terminalContextIds = collectTerminalContextIds($getRoot());
+      const skillState = readComposerSkillState();
       snapshot = {
         value: nextValue,
         cursor: nextCursor,
         expandedCursor: nextExpandedCursor,
         terminalContextIds,
+        ...skillState,
       };
     });
     snapshotRef.current = snapshot;
@@ -1692,8 +1951,60 @@ function ComposerPromptEditorInner({
         );
       },
       readSnapshot,
+      replaceRangeWithSkill: (input) => {
+        const rootElement = editor.getRootElement();
+        if (!rootElement) return false;
+        rootElement.focus({ preventScroll: true });
+        let inserted = false;
+        editor.update(
+          () => {
+            $setSelectionRangeAtComposerExpandedOffsets(input.rangeStart, input.rangeEnd);
+            const selection = $getSelection();
+            if (!$isRangeSelection(selection)) return;
+            selection.insertNodes([
+              $createComposerSkillNode(
+                input.skill.id,
+                input.skill.name,
+                input.skill.path ?? null,
+                input.skill.displayName?.trim() || formatProviderSkillDisplayName(input.skill),
+                resolveSkillDescription(input.skill),
+                input.skill.effectiveEnabled
+                  ? null
+                  : "This skill is disabled for future turns. Re-enable it or remove the chip before sending.",
+              ),
+              $createTextNode(" "),
+            ]);
+            inserted = true;
+          },
+          { discrete: true },
+        );
+        return inserted;
+      },
+      replaceRangeWithText: (input) => {
+        let replaced = false;
+        editor.update(
+          () => {
+            const value = $getRoot().getTextContent();
+            const rangeStart = Math.max(0, Math.min(value.length, input.rangeStart));
+            const rangeEnd = Math.max(rangeStart, Math.min(value.length, input.rangeEnd));
+            if (
+              input.expectedText !== undefined &&
+              value.slice(rangeStart, rangeEnd) !== input.expectedText
+            ) {
+              return;
+            }
+            $setSelectionRangeAtComposerExpandedOffsets(rangeStart, rangeEnd);
+            const selection = $getSelection();
+            if (!$isRangeSelection(selection)) return;
+            selection.insertText(input.text);
+            replaced = true;
+          },
+          { discrete: true },
+        );
+        return replaced;
+      },
     }),
-    [focusAt, readSnapshot],
+    [editor, focusAt, readSnapshot],
   );
 
   const handleEditorChange = useCallback((editorState: EditorState) => {
@@ -1713,13 +2024,29 @@ function ComposerPromptEditorInner({
         $readExpandedSelectionOffsetFromEditorState(fallbackExpandedCursor),
       );
       const terminalContextIds = collectTerminalContextIds($getRoot());
+      const skillState = readComposerSkillState();
       const previousSnapshot = snapshotRef.current;
       if (
         previousSnapshot.value === nextValue &&
         previousSnapshot.cursor === nextCursor &&
         previousSnapshot.expandedCursor === nextExpandedCursor &&
         previousSnapshot.terminalContextIds.length === terminalContextIds.length &&
-        previousSnapshot.terminalContextIds.every((id, index) => id === terminalContextIds[index])
+        previousSnapshot.terminalContextIds.every(
+          (id, index) => id === terminalContextIds[index],
+        ) &&
+        previousSnapshot.selectedSkills.length === skillState.selectedSkills.length &&
+        previousSnapshot.selectedSkills.every((skill, index) => {
+          const nextSkill = skillState.selectedSkills[index];
+          return (
+            skill.id === nextSkill?.id &&
+            skill.name === nextSkill.name &&
+            skill.path === nextSkill.path
+          );
+        }) &&
+        previousSnapshot.invalidSkillNames.length === skillState.invalidSkillNames.length &&
+        previousSnapshot.invalidSkillNames.every(
+          (name, index) => name === skillState.invalidSkillNames[index],
+        )
       ) {
         return;
       }
@@ -1731,6 +2058,7 @@ function ComposerPromptEditorInner({
         cursor: nextCursor,
         expandedCursor: nextExpandedCursor,
         terminalContextIds,
+        ...skillState,
       };
       const cursorAdjacentToMention =
         isCollapsedCursorAdjacentToInlineToken(nextValue, nextCursor, "left") ||
@@ -1803,7 +2131,7 @@ export function ComposerPromptEditor({
 }: ComposerPromptEditorProps) {
   const initialValueRef = useRef(value);
   const initialTerminalContextsRef = useRef(terminalContexts);
-  const initialSkillMetadataRef = useRef(skillMetadataByName(skills));
+  const initialSkillCatalogRef = useRef(buildComposerSkillCatalog(skills));
   const initialConfig = useMemo<InitialConfigType>(
     () => ({
       namespace: "t3tools-composer-editor",
@@ -1813,7 +2141,7 @@ export function ComposerPromptEditor({
         $setComposerEditorPrompt(
           initialValueRef.current,
           initialTerminalContextsRef.current,
-          initialSkillMetadataRef.current,
+          initialSkillCatalogRef.current,
         );
       },
       onError: (error) => {

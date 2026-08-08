@@ -137,6 +137,44 @@ describe("rightPanelStore", () => {
     });
   });
 
+  it("preserves unrelated surfaces while adding the extensions singleton", () => {
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: "extensions",
+            surfaces: [
+              { id: "diff", kind: "diff" },
+              { id: "extensions", kind: "extensions" },
+              { id: "agents", kind: "agents" },
+            ],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: true,
+          activeSurfaceId: "extensions",
+          surfaces: [
+            { id: "diff", kind: "diff" },
+            { id: "extensions", kind: "extensions" },
+            { id: "agents", kind: "agents" },
+          ],
+        },
+      },
+    });
+
+    useRightPanelStore.getState().open(refA, "extensions");
+    useRightPanelStore.getState().open(refA, "extensions");
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "extensions",
+      surfaces: [{ id: "extensions", kind: "extensions" }],
+    });
+  });
+
   it("open sets the active panel for a thread", () => {
     useRightPanelStore.getState().open(refA, "preview");
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("preview");

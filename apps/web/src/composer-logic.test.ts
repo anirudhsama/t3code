@@ -9,7 +9,11 @@ import {
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
   shouldSubmitComposerOnEnter,
+  contextualSkillLabel,
+  searchContextualSkills,
+  selectedSkillRef,
 } from "./composer-logic";
+import { ProviderExtensionItemId } from "@t3tools/contracts";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
 
 describe("shouldSubmitComposerOnEnter", () => {
@@ -23,6 +27,53 @@ describe("shouldSubmitComposerOnEnter", () => {
 
   it("inserts a newline for Shift+Enter", () => {
     expect(shouldSubmitComposerOnEnter({ isMobileViewport: false, shiftKey: true })).toBe(false);
+  });
+});
+
+const contextualSkills = [
+  {
+    id: ProviderExtensionItemId.make("/repo/.agents/skills/review/SKILL.md"),
+    name: "review",
+    displayName: "Review",
+    description: "Review this repository",
+    scope: "project" as const,
+    path: "/repo/.agents/skills/review/SKILL.md",
+    providerEnabled: true,
+    threadOverride: "inherit" as const,
+    effectiveEnabled: true,
+  },
+  {
+    id: ProviderExtensionItemId.make("/home/user/.codex/skills/review/SKILL.md"),
+    name: "review",
+    displayName: "Review",
+    description: "Review any project",
+    scope: "user" as const,
+    path: "/home/user/.codex/skills/review/SKILL.md",
+    providerEnabled: true,
+    threadOverride: "disabled" as const,
+    effectiveEnabled: false,
+  },
+];
+
+describe("contextual skills", () => {
+  it("keeps path-distinct duplicate names and disambiguates the visible label", () => {
+    expect(contextualSkillLabel(contextualSkills[0]!, contextualSkills)).toBe(
+      "Review — project · /repo/.agents/skills/review/SKILL.md",
+    );
+  });
+
+  it("excludes disabled skills from new selection without collapsing duplicates", () => {
+    expect(searchContextualSkills(contextualSkills, "review").map((skill) => skill.id)).toEqual([
+      contextualSkills[0]!.id,
+    ]);
+  });
+
+  it("builds the exact provider-opaque selected skill reference", () => {
+    expect(selectedSkillRef(contextualSkills[0]!)).toEqual({
+      id: contextualSkills[0]!.id,
+      name: "review",
+      path: "/repo/.agents/skills/review/SKILL.md",
+    });
   });
 });
 

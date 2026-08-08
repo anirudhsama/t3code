@@ -105,6 +105,9 @@ export function buildLocalDraftThread(
     checkpoints: [],
     activities: [],
     proposedPlans: [],
+    skillOverrides: {},
+    mcpOverrides: {},
+    extensionOverridesRevision: 0,
   };
 }
 

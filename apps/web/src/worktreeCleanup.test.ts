@@ -32,6 +32,9 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     latestTurn: null,
     branch: null,
     worktreePath: null,
+    skillOverrides: {},
+    mcpOverrides: {},
+    extensionOverridesRevision: 0,
     ...overrides,
   };
 }

@@ -29,6 +29,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import {
   ArrowLeftIcon,
+  BlocksIcon,
   CornerLeftUpIcon,
   FileSearchIcon,
   FolderIcon,
@@ -1477,6 +1478,24 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  const currentThreadRef = activeThread
+    ? scopeThreadRef(activeThread.environmentId, activeThread.id)
+    : activeDraftThread
+      ? scopeThreadRef(activeDraftThread.environmentId, activeDraftThread.threadId)
+      : null;
+  actionItems.push({
+    kind: "action",
+    value: "action:skills-and-mcp",
+    searchTerms: ["skills", "mcp", "extensions", "tools", "right panel"],
+    title: "Open Skills & MCP",
+    description: "Manage future availability for this thread",
+    disabled: currentThreadRef === null,
+    icon: <BlocksIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      if (currentThreadRef) useRightPanelStore.getState().open(currentThreadRef, "extensions");
+    },
+  });
 
   actionItems.push({
     kind: "action",

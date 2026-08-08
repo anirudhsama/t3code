@@ -9,8 +9,14 @@ import {
   createEditor,
   PASTE_COMMAND,
 } from "lexical";
+import { ProviderExtensionItemId } from "@t3tools/contracts";
 
 import { registerComposerInlineTokenPaste } from "./composerInlineTokenPaste";
+import {
+  $createComposerSkillNodeForSkill,
+  buildComposerSkillCatalog,
+  ComposerSkillNode,
+} from "./ComposerPromptEditor";
 
 class TestClipboardEvent extends Event {
   readonly clipboardData: DataTransfer;
@@ -148,5 +154,162 @@ describe("registerComposerInlineTokenPaste", () => {
     expect(editor.getEditorState().read(() => $getRoot().getTextContent())).toBe(
       "<mention:@scope/pkg/sub> ",
     );
+  });
+});
+
+describe("ComposerSkillNode", () => {
+  const skill = {
+    id: ProviderExtensionItemId.make("/repo/.agents/skills/review/SKILL.md"),
+    name: "review",
+    displayName: "Review",
+    description: "Review this repository",
+    scope: "project" as const,
+    path: "/repo/.agents/skills/review/SKILL.md",
+    providerEnabled: true,
+    threadOverride: "inherit" as const,
+    effectiveEnabled: true,
+  };
+
+  it("serializes v2 provider identity and keeps readable text", () => {
+    const editor = createEditor({ nodes: [ComposerSkillNode] });
+    editor.update(
+      () => {
+        const paragraph = $createParagraphNode();
+        paragraph.append($createComposerSkillNodeForSkill(skill));
+        $getRoot().append(paragraph);
+      },
+      { discrete: true },
+    );
+
+    expect(editor.getEditorState().toJSON()).toMatchObject({
+      root: {
+        children: [
+          {
+            children: [
+              {
+                type: "composer-skill",
+                version: 2,
+                skillId: skill.id,
+                skillName: "review",
+                skillPath: skill.path,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(editor.getEditorState().read(() => $getRoot().getTextContent())).toBe("$review");
+  });
+
+  it("continues decoding v1 name-only nodes", () => {
+    const editor = createEditor({ nodes: [ComposerSkillNode] });
+    const state = editor.parseEditorState({
+      root: {
+        children: [
+          {
+            children: [
+              {
+                detail: 0,
+                format: 0,
+                mode: "normal",
+                style: "",
+                skillName: "legacy-review",
+                textFormat: 0,
+                textStyle: "",
+                type: "composer-skill",
+                version: 1,
+              },
+            ],
+            direction: null,
+            format: "",
+            indent: 0,
+            type: "paragraph",
+            version: 1,
+            textFormat: 0,
+            textStyle: "",
+          },
+        ],
+        direction: null,
+        format: "",
+        indent: 0,
+        type: "root",
+        version: 1,
+      },
+    } as never);
+    expect(state.read(() => $getRoot().getTextContent())).toBe("$legacy-review");
+  });
+
+  it("keeps an exact chip invalid when only a same-name skill at another path remains", () => {
+    const editor = createEditor({ nodes: [ComposerSkillNode] });
+    let exactId: string | null = null;
+    let invalidReason: string | null = null;
+    editor.update(
+      () => {
+        const node = $createComposerSkillNodeForSkill(skill);
+        const paragraph = $createParagraphNode().append(node);
+        $getRoot().append(paragraph);
+        node.syncFromCatalog(
+          buildComposerSkillCatalog([
+            {
+              ...skill,
+              id: ProviderExtensionItemId.make("/home/user/.codex/skills/review/SKILL.md"),
+              path: "/home/user/.codex/skills/review/SKILL.md",
+              scope: "user",
+            },
+          ]),
+        );
+        exactId = node.getLatest().__skillId;
+        invalidReason = node.getLatest().__invalidReason;
+      },
+      { discrete: true },
+    );
+
+    expect(exactId).toBe(skill.id);
+    expect(invalidReason).toContain("no longer available");
+  });
+
+  it("marks an exact chip invalid when its thread-effective state becomes disabled", () => {
+    const editor = createEditor({ nodes: [ComposerSkillNode] });
+    let invalidReason: string | null = null;
+    editor.update(
+      () => {
+        const node = $createComposerSkillNodeForSkill(skill);
+        const paragraph = $createParagraphNode().append(node);
+        $getRoot().append(paragraph);
+        node.syncFromCatalog(
+          buildComposerSkillCatalog([
+            { ...skill, threadOverride: "disabled", effectiveEnabled: false },
+          ]),
+        );
+        invalidReason = node.getLatest().__invalidReason;
+      },
+      { discrete: true },
+    );
+
+    expect(invalidReason).toContain("disabled for future turns");
+  });
+
+  it("does not rewrite a stale v2 path when a provider reuses the ID", () => {
+    const editor = createEditor({ nodes: [ComposerSkillNode] });
+    let path: string | null = null;
+    let invalidReason: string | null = null;
+    editor.update(
+      () => {
+        const node = $createComposerSkillNodeForSkill(skill);
+        const paragraph = $createParagraphNode().append(node);
+        $getRoot().append(paragraph);
+        const movedCatalog = buildComposerSkillCatalog([
+          { ...skill, path: "/repo/.agents/skills/moved/SKILL.md" },
+        ]);
+        node.syncFromCatalog(movedCatalog);
+        node.syncFromCatalog(movedCatalog);
+        path = node.getLatest().__skillPath;
+        invalidReason = node.getLatest().__invalidReason;
+      },
+      { discrete: true },
+    );
+
+    expect(path).toBe(skill.path);
+    expect(invalidReason).toContain("identity changed");
   });
 });
