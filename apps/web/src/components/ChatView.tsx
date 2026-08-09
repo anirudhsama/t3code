@@ -146,6 +146,7 @@ import {
 import { RightPanelTabs } from "./RightPanelTabs";
 import { AgentsPanel } from "./AgentsPanel";
 import { ExtensionsPanel } from "./ExtensionsPanel";
+import { canOpenMcpAuthOnClient } from "~/extensionsPanelLogic";
 import {
   deriveAgentPanelModel,
   foldSubagentActivities,
@@ -1304,6 +1305,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
+  const setDraftMcpOverride = useComposerDraftStore((store) => store.setDraftMcpOverride);
   const getDraftSessionByLogicalProjectKey = useComposerDraftStore(
     (store) => store.getDraftSessionByLogicalProjectKey,
   );
@@ -1737,6 +1739,13 @@ function ChatViewContent(props: ChatViewProps) {
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
+  const canOpenMcpAuthLocally =
+    activeEnvironment !== null &&
+    canOpenMcpAuthOnClient({
+      target: activeEnvironment.entry.target,
+      electron: isElectron,
+      hostname: typeof window === "undefined" ? "" : window.location.hostname,
+    });
   const activeReconnectingEnvironmentId =
     activeEnvironmentConnectionPhase === "connecting" ||
     activeEnvironmentConnectionPhase === "reconnecting"
@@ -5175,6 +5184,9 @@ function ChatViewContent(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      ...(localDraftThread && Object.keys(localDraftThread.mcpOverrides).length > 0
+                        ? { initialMcpOverrides: localDraftThread.mcpOverrides }
+                        : {}),
                     },
                   }
                 : {}),
@@ -6033,6 +6045,14 @@ function ChatViewContent(props: ChatViewProps) {
         isLoading={extensionsQuery.isPending}
         durable={isServerThread}
         activeTurn={isWorking || !latestTurnSettled}
+        projectId={activeProject?.id ?? null}
+        providerInstanceId={activeProviderInstanceId}
+        draftMcpOverrides={localDraftThread?.mcpOverrides ?? {}}
+        canOpenAuthLocally={canOpenMcpAuthLocally}
+        onSetDraftMcpOverride={(mcpServerId, state) => {
+          if (!composerDraftTarget || isServerThread) return;
+          setDraftMcpOverride(composerDraftTarget, mcpServerId, state);
+        }}
       />
     ) : (activeRightPanelSurface?.kind === "files" || activeRightPanelSurface?.kind === "file") &&
       activeProject &&

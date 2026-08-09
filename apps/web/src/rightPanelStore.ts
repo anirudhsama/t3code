@@ -49,13 +49,14 @@ export type RightPanelSurface =
   | { id: "extensions"; kind: "extensions" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-// v10 adds the Skills & MCP singleton without changing existing descriptors.
-const RIGHT_PANEL_STORAGE_VERSION = 10;
+// v11 persists whether the inventory-only Skills section is collapsed.
+const RIGHT_PANEL_STORAGE_VERSION = 11;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
   activeSurfaceId: string | null;
   surfaces: RightPanelSurface[];
+  extensionsSkillsCollapsed?: boolean;
 }
 
 interface RightPanelStoreState {
@@ -83,6 +84,7 @@ interface RightPanelStoreState {
   close: (ref: ScopedThreadRef) => void;
   toggleVisibility: (ref: ScopedThreadRef) => void;
   toggle: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "file" | "terminal">) => void;
+  setExtensionsSkillsCollapsed: (ref: ScopedThreadRef, collapsed: boolean) => void;
   removeThread: (ref: ScopedThreadRef) => void;
 }
 
@@ -535,6 +537,14 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             }
             return upsertSurface(current, singletonSurface(kind));
           }),
+        })),
+      setExtensionsSkillsCollapsed: (ref, collapsed) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+            current.extensionsSkillsCollapsed === collapsed
+              ? current
+              : { ...current, extensionsSkillsCollapsed: collapsed },
+          ),
         })),
       removeThread: (ref) =>
         set((state) => {

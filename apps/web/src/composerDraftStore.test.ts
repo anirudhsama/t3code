@@ -11,6 +11,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderExtensionItemId,
   ThreadId,
   type ModelSelection,
   type ProviderOptionSelection,
@@ -1048,6 +1049,23 @@ describe("composerDraftStore project draft thread mapping", () => {
     store.setDraftThreadContext(draftId, { startFromOrigin: false });
 
     expect(useComposerDraftStore.getState().getDraftThread(draftId)?.startFromOrigin).toBe(false);
+  });
+
+  it("stores optimistic MCP overrides with a draft thread", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+
+    store.setDraftMcpOverride(draftId, ProviderExtensionItemId.make("github"), "disabled");
+    store.setDraftMcpOverride(draftId, ProviderExtensionItemId.make("docs"), "enabled");
+    expect(useComposerDraftStore.getState().getDraftThread(draftId)?.mcpOverrides).toEqual({
+      github: "disabled",
+      docs: "enabled",
+    });
+
+    store.setDraftMcpOverride(draftId, ProviderExtensionItemId.make("github"), "inherit");
+    expect(useComposerDraftStore.getState().getDraftThread(draftId)?.mcpOverrides).toEqual({
+      docs: "enabled",
+    });
   });
 
   it("preserves existing branch and worktree when setProjectDraftThreadId receives undefined", () => {

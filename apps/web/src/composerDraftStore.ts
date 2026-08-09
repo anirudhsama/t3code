@@ -6,6 +6,9 @@ import {
   ModelSelection,
   ProjectId,
   ProviderInstanceId,
+  type ProviderExtensionItemId,
+  type ProviderExtensionOverrideState,
+  ProviderMcpOverrides,
   ProviderInteractionMode,
   ProviderDriverKind,
   ProviderOptionSelection,
@@ -57,7 +60,7 @@ const isProviderDriverKind = Schema.is(ProviderDriverKind);
 const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
-const COMPOSER_DRAFT_STORAGE_VERSION = 8;
+const COMPOSER_DRAFT_STORAGE_VERSION = 9;
 const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
@@ -216,6 +219,7 @@ const PersistedDraftThreadState = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
   envMode: DraftThreadEnvModeSchema,
   startFromOrigin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  mcpOverrides: ProviderMcpOverrides.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   promotedTo: Schema.optionalKey(
     Schema.NullOr(
       Schema.Struct({
@@ -295,6 +299,7 @@ export interface DraftSessionState {
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
   startFromOrigin: boolean;
+  mcpOverrides: ProviderMcpOverrides;
   promotedTo?: ScopedThreadRef | null;
 }
 
@@ -389,6 +394,11 @@ interface ComposerDraftStoreState {
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
     },
+  ) => void;
+  setDraftMcpOverride: (
+    threadRef: ComposerThreadTarget,
+    mcpServerId: ProviderExtensionItemId,
+    state: ProviderExtensionOverrideState,
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
   clearProjectDraftThreadById: (
@@ -1378,6 +1388,7 @@ function createDraftThreadState(
     envMode:
       options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
     startFromOrigin: nextStartFromOrigin,
+    mcpOverrides: projectChanged ? {} : (existingThread?.mcpOverrides ?? {}),
     promotedTo: null,
   };
 }
@@ -1410,6 +1421,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
     left.startFromOrigin === right.startFromOrigin &&
+    Equal.equals(left.mcpOverrides, right.mcpOverrides) &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
 }
@@ -1505,6 +1517,9 @@ function normalizePersistedDraftThreads(
       const branch = candidateDraftThread.branch;
       const worktreePath = candidateDraftThread.worktreePath;
       const startFromOrigin = candidateDraftThread.startFromOrigin === true;
+      const mcpOverrides = Schema.is(ProviderMcpOverrides)(candidateDraftThread.mcpOverrides)
+        ? candidateDraftThread.mcpOverrides
+        : {};
       const normalizedWorktreePath = typeof worktreePath === "string" ? worktreePath : null;
       const promotedToCandidate = candidateDraftThread.promotedTo;
       const promotedToRecord =
@@ -1553,6 +1568,7 @@ function normalizePersistedDraftThreads(
         worktreePath: normalizedWorktreePath,
         envMode: normalizeDraftThreadEnvMode(candidateDraftThread.envMode, normalizedWorktreePath),
         startFromOrigin,
+        mcpOverrides,
         promotedTo,
       };
     }
@@ -1599,6 +1615,7 @@ function normalizePersistedDraftThreads(
           worktreePath: null,
           envMode: "local",
           startFromOrigin: false,
+          mcpOverrides: {},
           promotedTo: null,
         };
       } else if (
@@ -2170,6 +2187,7 @@ function toHydratedDraftThreadState(
     worktreePath: persistedDraftThread.worktreePath,
     envMode: persistedDraftThread.envMode,
     startFromOrigin: persistedDraftThread.startFromOrigin,
+    mcpOverrides: persistedDraftThread.mcpOverrides,
     promotedTo: persistedDraftThread.promotedTo
       ? scopeThreadRef(
           persistedDraftThread.promotedTo.environmentId as EnvironmentId,
@@ -2378,6 +2396,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               envMode:
                 options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
               startFromOrigin: nextStartFromOrigin,
+              mcpOverrides: projectChanged ? {} : existing.mcpOverrides,
               promotedTo: existing.promotedTo ?? null,
             };
             const isUnchanged =
@@ -2391,6 +2410,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftThread.worktreePath === existing.worktreePath &&
               nextDraftThread.envMode === existing.envMode &&
               nextDraftThread.startFromOrigin === existing.startFromOrigin &&
+              Equal.equals(nextDraftThread.mcpOverrides, existing.mcpOverrides) &&
               scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
             if (isUnchanged) {
               return state;
@@ -2399,6 +2419,27 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               draftThreadsByThreadKey: {
                 ...state.draftThreadsByThreadKey,
                 [threadKey]: nextDraftThread,
+              },
+            };
+          });
+        },
+        setDraftMcpOverride: (threadRef, mcpServerId, overrideState) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) return;
+          set((state) => {
+            const existing = state.draftThreadsByThreadKey[threadKey];
+            if (!existing) return state;
+            const nextMcpOverrides = { ...existing.mcpOverrides };
+            if (overrideState === "inherit") {
+              delete nextMcpOverrides[mcpServerId];
+            } else {
+              nextMcpOverrides[mcpServerId] = overrideState;
+            }
+            if (Equal.equals(existing.mcpOverrides, nextMcpOverrides)) return state;
+            return {
+              draftThreadsByThreadKey: {
+                ...state.draftThreadsByThreadKey,
+                [threadKey]: { ...existing, mcpOverrides: nextMcpOverrides },
               },
             };
           });

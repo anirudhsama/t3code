@@ -1,12 +1,16 @@
 import type {
   EnvironmentId,
+  ProjectId,
   ProviderExtensionOverrideState,
+  ProviderInstanceId,
+  ProviderMcpOverrides,
   ProviderMcpServer,
   ProviderSkill,
   ThreadExtensionsRefreshDomain,
   ThreadExtensionsSnapshot,
   ThreadId,
 } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -14,26 +18,34 @@ import {
 import {
   AlertTriangle,
   Blocks,
+  ChevronDown,
+  ChevronRight,
+  Clipboard,
   KeyRound,
   Link2,
   Lock,
   RefreshCw,
-  RotateCcw,
   Search,
 } from "lucide-react";
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
 
 import {
+  advanceMcpAuthState,
+  applyDraftMcpOverrides,
+  effectiveMcpOriginLabel,
   extensionPending,
   extensionRetryTarget,
   filterExtensionMcpServers,
   filterExtensionSkills,
+  mcpStatusLabel,
+  type McpAuthUiState,
   SKILL_GROUPS,
 } from "~/extensionsPanelLogic";
 import { readLocalApi } from "~/localApi";
 import { extensionsEnvironment } from "~/state/extensions";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { selectThreadRightPanelState, useRightPanelStore } from "~/rightPanelStore";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -43,11 +55,20 @@ import { Switch } from "~/components/ui/switch";
 interface ExtensionsPanelProps {
   environmentId: EnvironmentId;
   threadId: ThreadId;
+  projectId: ProjectId | null;
+  providerInstanceId: ProviderInstanceId | null;
   snapshot: ThreadExtensionsSnapshot | null;
   loadError: string | null;
   isLoading: boolean;
   durable: boolean;
   activeTurn: boolean;
+  draftMcpOverrides: ProviderMcpOverrides;
+  canOpenAuthLocally: boolean;
+  skillsCollapsed?: boolean;
+  onSetDraftMcpOverride: (
+    mcpServerId: ProviderMcpServer["id"],
+    state: ProviderExtensionOverrideState,
+  ) => void;
 }
 
 function errorMessage(value: unknown, fallback: string): string {
@@ -60,105 +81,73 @@ function formatRefreshTime(value: string | null): string {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
 
-function overrideBadge(state: ProviderExtensionOverrideState) {
-  return state === "inherit" ? "Inherit" : state === "enabled" ? "Enabled here" : "Disabled here";
-}
-
 function provenanceLabel(skill: ProviderSkill): string {
   return skill.origin?.label ?? skill.origin?.path ?? skill.path ?? skill.scope;
 }
-
-const SkillRow = memo(function SkillRow(props: {
-  skill: ProviderSkill;
-  disabled: boolean;
-  pending: boolean;
-  onSet: (skill: ProviderSkill, state: ProviderExtensionOverrideState) => void;
-}) {
-  const collision = props.skill.shadowedBy
-    ? `Shadowed by ${props.skill.shadowedBy}`
-    : props.skill.precedence !== undefined
-      ? `Precedence ${props.skill.precedence}`
-      : null;
-  return (
-    <div
-      className="rounded-lg border border-border/65 bg-card/45 px-3 py-2.5"
-      data-extension-skill-id={props.skill.id}
-    >
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="truncate text-sm font-medium">
-              {props.skill.displayName ?? props.skill.name}
-            </span>
-            <Badge size="sm" variant={props.skill.effectiveEnabled ? "success" : "secondary"}>
-              {props.skill.effectiveEnabled ? "Available" : "Unavailable"}
-            </Badge>
-            {collision ? (
-              <Badge size="sm" variant="warning">
-                {collision}
-              </Badge>
-            ) : null}
-          </div>
-          <p className="mt-0.5 font-mono text-[.65rem] text-muted-foreground wrap-anywhere">
-            ${props.skill.name}
-          </p>
-          {props.skill.description ? (
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              {props.skill.description}
-            </p>
-          ) : null}
-          <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[.68rem] text-muted-foreground">
-            <span>Source: {provenanceLabel(props.skill)}</span>
-            <span>Provider default: {props.skill.providerEnabled ? "on" : "off"}</span>
-            <span>Thread: {overrideBadge(props.skill.threadOverride)}</span>
-          </div>
-          {props.pending ? (
-            <p className="mt-1 text-[.68rem] text-warning-foreground">
-              Pending until the current turn completes.
-            </p>
-          ) : null}
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          {props.skill.threadOverride !== "inherit" ? (
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              aria-label={`Restore provider default for ${props.skill.name}`}
-              disabled={props.disabled}
-              onClick={() => props.onSet(props.skill, "inherit")}
-            >
-              <RotateCcw />
-            </Button>
-          ) : null}
-          <Switch
-            checked={props.skill.effectiveEnabled}
-            disabled={props.disabled}
-            aria-label={`${props.skill.effectiveEnabled ? "Disable" : "Enable"} ${props.skill.name} for this thread`}
-            onCheckedChange={(checked) =>
-              props.onSet(props.skill, checked ? "enabled" : "disabled")
-            }
-          />
-        </div>
-      </div>
-    </div>
-  );
-});
 
 function originLabel(origin: ProviderMcpServer["origins"][number]): string {
   return origin.label ?? origin.path ?? origin.scope;
 }
 
+function serverInfoLabel(serverInfo: unknown): string | null {
+  if (!serverInfo || typeof serverInfo !== "object") return null;
+  const info = serverInfo as { name?: unknown; title?: unknown; version?: unknown };
+  const name =
+    typeof info.title === "string" ? info.title : typeof info.name === "string" ? info.name : null;
+  const version = typeof info.version === "string" ? info.version : null;
+  return [name, version].filter(Boolean).join(" · ") || null;
+}
+
+const SkillRow = memo(function SkillRow({ skill }: { skill: ProviderSkill }) {
+  const collision = skill.shadowedBy
+    ? `Shadowed by ${skill.shadowedBy}`
+    : skill.precedence !== undefined
+      ? `Precedence ${skill.precedence}`
+      : null;
+  return (
+    <div
+      className="rounded-lg border border-border/65 bg-card/45 px-3 py-2.5"
+      data-extension-skill-id={skill.id}
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="truncate text-sm font-medium">{skill.displayName ?? skill.name}</span>
+        {collision ? (
+          <Badge size="sm" variant="warning">
+            {collision}
+          </Badge>
+        ) : null}
+      </div>
+      {skill.description ? (
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{skill.description}</p>
+      ) : null}
+      <p className="mt-1.5 text-[.68rem] text-muted-foreground wrap-anywhere">
+        {provenanceLabel(skill)}
+      </p>
+    </div>
+  );
+});
+
 const McpRow = memo(function McpRow(props: {
   server: ProviderMcpServer;
+  durable: boolean;
   disabled: boolean;
   pending: boolean;
+  authState: McpAuthUiState | null;
+  canOpenAuthLocally: boolean;
   capabilities: ThreadExtensionsSnapshot["capabilities"]["mcp"];
   onSet: (server: ProviderMcpServer, state: ProviderExtensionOverrideState) => void;
   onReconnect: (server: ProviderMcpServer) => void;
   onAuthenticate: (server: ProviderMcpServer) => void;
+  onCopyAuthUrl: (url: string) => void;
 }) {
-  const effectiveOrigin = props.server.origins.find((origin) => origin.effective);
-  const detailsId = `mcp-details-${encodeURIComponent(props.server.id)}`;
+  const status = mcpStatusLabel(props.server, props.durable);
+  const info = serverInfoLabel(props.server.serverInfo);
+  const authPending =
+    props.authState?.phase === "beginning" || props.authState?.phase === "waiting";
+  const authUrl =
+    props.authState?.phase === "waiting" || props.authState?.phase === "error"
+      ? props.authState.authorizationUrl
+      : undefined;
   return (
     <div
       className="rounded-lg border border-border/65 bg-card/45 px-3 py-2.5"
@@ -168,54 +157,80 @@ const McpRow = memo(function McpRow(props: {
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="truncate text-sm font-medium">{props.server.name}</span>
-            <Badge size="sm" variant={props.server.effectiveEnabled ? "success" : "secondary"}>
-              {props.server.effectiveEnabled ? "Available" : "Unavailable"}
+            <Badge size="sm" variant="secondary">
+              {effectiveMcpOriginLabel(props.server)}
             </Badge>
-            <Badge
-              size="sm"
-              variant={props.server.startupStatus === "failed" ? "error" : "outline"}
-            >
-              {props.server.startupStatus}
-            </Badge>
-            <Badge
-              size="sm"
-              variant={props.server.authStatus === "needs-auth" ? "warning" : "outline"}
-            >
-              {props.server.authStatus}
-            </Badge>
+            {status ? (
+              <Badge
+                size="sm"
+                variant={
+                  status === "Failed"
+                    ? "error"
+                    : status === "Login required"
+                      ? "warning"
+                      : status === "Ready"
+                        ? "success"
+                        : "outline"
+                }
+              >
+                {status}
+              </Badge>
+            ) : null}
           </div>
-          <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[.68rem] text-muted-foreground">
-            <span>Origin: {effectiveOrigin ? originLabel(effectiveOrigin) : "provider"}</span>
-            <span>Provider default: {props.server.providerEnabled ? "on" : "off"}</span>
-            <span>Thread: {overrideBadge(props.server.threadOverride)}</span>
-            <span>
-              {props.server.toolCount} tools · {props.server.resourceCount} resources ·{" "}
-              {props.server.resourceTemplateCount} templates
-            </span>
-          </div>
-          {props.server.managed ? (
-            <p className="mt-1.5 flex items-center gap-1 text-[.68rem] text-muted-foreground">
-              <Lock className="size-3" />
-              Managed by T3 Code and required for runtime coordination.
-            </p>
-          ) : null}
-          {props.server.error ? (
-            <p className="mt-1.5 text-xs text-destructive-foreground">{props.server.error}</p>
-          ) : null}
           {props.pending ? (
             <p className="mt-1 text-[.68rem] text-warning-foreground">
-              Pending until the current turn completes.
+              {props.durable
+                ? "Pending provider reconciliation."
+                : "Will apply when this thread is created."}
             </p>
           ) : null}
-          <details id={detailsId} className="mt-1.5 text-[.68rem] text-muted-foreground">
+          {props.capabilities.authenticate && props.server.authStatus === "needs-auth" ? (
+            <div className="mt-2 space-y-1.5">
+              <Button
+                size="sm"
+                variant="default"
+                disabled={authPending}
+                onClick={() => props.onAuthenticate(props.server)}
+              >
+                <KeyRound />
+                {props.authState?.phase === "beginning"
+                  ? "Starting login…"
+                  : props.authState?.phase === "waiting"
+                    ? "Waiting for login…"
+                    : "Authenticate"}
+              </Button>
+              {!props.canOpenAuthLocally ? (
+                <p className="text-[.68rem] leading-relaxed text-muted-foreground">
+                  Login must be completed from the machine running this T3 Code server.
+                </p>
+              ) : null}
+              {!props.canOpenAuthLocally && authUrl ? (
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <code className="min-w-0 flex-1 truncate rounded bg-muted px-1.5 py-1 text-[.65rem]">
+                    {authUrl}
+                  </code>
+                  <Button
+                    size="icon-xs"
+                    variant="outline"
+                    aria-label={`Copy authentication URL for ${props.server.name}`}
+                    onClick={() => props.onCopyAuthUrl(authUrl)}
+                  >
+                    <Clipboard />
+                  </Button>
+                </div>
+              ) : null}
+              {props.authState?.phase === "error" ? (
+                <p className="text-xs text-destructive-foreground">{props.authState.message}</p>
+              ) : null}
+            </div>
+          ) : null}
+          <details className="mt-2 text-[.68rem] text-muted-foreground">
             <summary className="cursor-pointer select-none hover:text-foreground">Details</summary>
             <div className="mt-1.5 space-y-1 border-l border-border pl-2">
+              <p className="font-medium text-foreground/80">Origin stack</p>
               {props.server.origins.length > 0 ? (
                 props.server.origins.map((origin, index) => (
-                  <p
-                    key={`${origin.scope}:${origin.path ?? origin.label ?? index}`}
-                    className="wrap-anywhere"
-                  >
+                  <p key={`${origin.scope}:${origin.path ?? origin.label ?? index}`}>
                     {origin.effective ? "Effective · " : ""}
                     {originLabel(origin)}
                   </p>
@@ -223,67 +238,68 @@ const McpRow = memo(function McpRow(props: {
               ) : (
                 <p>No provider origin metadata.</p>
               )}
-              <p>
-                Startup: {props.server.startupStatus} · Auth: {props.server.authStatus}
-              </p>
+              {props.server.managed ? (
+                <p className="flex items-center gap-1">
+                  <Lock className="size-3" />
+                  Managed by T3 Code and required for runtime coordination.
+                </p>
+              ) : null}
+              {info ? <p>Server: {info}</p> : null}
+              {props.server.statusObserved ? (
+                <p>
+                  {props.server.toolCount} tools · {props.server.resourceCount} resources ·{" "}
+                  {props.server.resourceTemplateCount} templates
+                </p>
+              ) : (
+                <p>
+                  {props.durable
+                    ? "Status appears once discovery runs or the session starts."
+                    : "Status appears once discovery runs."}
+                </p>
+              )}
+              {props.durable && props.server.startupStatus === "failed" && props.server.error ? (
+                <p className="text-destructive-foreground">{props.server.error}</p>
+              ) : null}
+              {props.capabilities.reconnect && props.durable && props.server.effectiveEnabled ? (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={props.disabled}
+                  onClick={() => props.onReconnect(props.server)}
+                >
+                  <Link2 />
+                  Reconnect
+                </Button>
+              ) : null}
             </div>
           </details>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {props.capabilities.reconnect && props.server.effectiveEnabled ? (
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={props.disabled}
-                onClick={() => props.onReconnect(props.server)}
-              >
-                <Link2 />
-                Reconnect
-              </Button>
-            ) : null}
-            {props.capabilities.authenticate && props.server.authStatus === "needs-auth" ? (
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={props.disabled}
-                onClick={() => props.onAuthenticate(props.server)}
-              >
-                <KeyRound />
-                Authenticate
-              </Button>
-            ) : null}
-          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
-          {props.server.threadOverride !== "inherit" && props.server.toggleable ? (
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              aria-label={`Restore provider default for ${props.server.name}`}
-              disabled={props.disabled}
-              onClick={() => props.onSet(props.server, "inherit")}
-            >
-              <RotateCcw />
-            </Button>
-          ) : null}
-          <Switch
-            checked={props.server.effectiveEnabled}
-            disabled={props.disabled || !props.server.toggleable}
-            aria-label={
-              props.server.toggleable
-                ? `${props.server.effectiveEnabled ? "Disable" : "Enable"} ${props.server.name} for this thread`
-                : `${props.server.name} is managed by T3 Code`
-            }
-            onCheckedChange={(checked) =>
-              props.onSet(props.server, checked ? "enabled" : "disabled")
-            }
-          />
-        </div>
+        <Switch
+          checked={props.server.effectiveEnabled}
+          disabled={props.disabled || !props.server.toggleable}
+          aria-label={
+            props.server.toggleable
+              ? `${props.server.effectiveEnabled ? "Disable" : "Enable"} ${props.server.name} for this thread`
+              : `${props.server.name} is managed by T3 Code`
+          }
+          onCheckedChange={(checked) => props.onSet(props.server, checked ? "enabled" : "disabled")}
+        />
       </div>
     </div>
   );
 });
 
 export function ExtensionsPanel(props: ExtensionsPanelProps) {
+  const panelRef = useMemo(
+    () => scopeThreadRef(props.environmentId, props.threadId),
+    [props.environmentId, props.threadId],
+  );
+  const persistedSkillsCollapsed = useRightPanelStore(
+    (state) =>
+      selectThreadRightPanelState(state.byThreadKey, panelRef).extensionsSkillsCollapsed ?? true,
+  );
+  const skillsCollapsed = props.skillsCollapsed ?? persistedSkillsCollapsed;
+  const setSkillsCollapsed = useRightPanelStore((state) => state.setExtensionsSkillsCollapsed);
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
   const [refreshing, setRefreshing] = useState<ReadonlySet<ThreadExtensionsRefreshDomain>>(
@@ -291,11 +307,12 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
   );
   const [mutationRevision, setMutationRevision] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const setSkillOverride = useAtomCommand(threadEnvironment.setSkillOverride, {
-    reportFailure: false,
-  });
+  const [authStates, setAuthStates] = useState<Readonly<Record<string, McpAuthUiState>>>({});
   const setMcpOverride = useAtomCommand(threadEnvironment.setMcpOverride, { reportFailure: false });
   const refresh = useAtomCommand(extensionsEnvironment.refresh, { reportFailure: false });
+  const refreshPreview = useAtomCommand(extensionsEnvironment.refreshPreview, {
+    reportFailure: false,
+  });
   const reconnectMcp = useAtomCommand(extensionsEnvironment.reconnectMcp, { reportFailure: false });
   const beginMcpAuth = useAtomCommand(extensionsEnvironment.beginMcpAuth, { reportFailure: false });
 
@@ -305,150 +322,251 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
     }
   }, [mutationRevision, props.snapshot?.overrideRevision]);
 
-  const mutationDisabled = !props.durable || mutationRevision !== null;
   const pending = props.snapshot ? extensionPending(props.snapshot) : false;
+  const displayedMcp = useMemo(
+    () =>
+      props.durable
+        ? (props.snapshot?.mcpServers ?? [])
+        : applyDraftMcpOverrides(props.snapshot?.mcpServers ?? [], props.draftMcpOverrides),
+    [props.draftMcpOverrides, props.durable, props.snapshot?.mcpServers],
+  );
   const filteredSkills = useMemo(
     () => filterExtensionSkills(props.snapshot?.skills ?? [], deferredQuery),
     [deferredQuery, props.snapshot?.skills],
   );
   const filteredMcp = useMemo(
-    () => filterExtensionMcpServers(props.snapshot?.mcpServers ?? [], deferredQuery),
-    [deferredQuery, props.snapshot?.mcpServers],
+    () => filterExtensionMcpServers(displayedMcp, deferredQuery),
+    [deferredQuery, displayedMcp],
   );
 
-  const runMutation = useCallback(
-    async (target: {
-      kind: "skill" | "mcp";
-      id: string;
-      state: ProviderExtensionOverrideState;
-    }) => {
-      const snapshot = props.snapshot;
-      if (!snapshot || !props.durable || mutationRevision !== null) return;
+  const runRefresh = useCallback(
+    async (domain: ThreadExtensionsRefreshDomain) => {
+      if (refreshing.has(domain)) return;
+      if (!props.durable && (!props.projectId || !props.providerInstanceId)) return;
+      setRefreshing((current) => new Set(current).add(domain));
       setActionError(null);
-      const expectedNextRevision = snapshot.overrideRevision + 1;
-      setMutationRevision(expectedNextRevision);
-      const result =
-        target.kind === "skill"
-          ? await setSkillOverride({
-              environmentId: props.environmentId,
-              input: {
-                threadId: props.threadId,
-                skillId: target.id as ProviderSkill["id"],
-                state: target.state,
-                expectedRevision: snapshot.overrideRevision,
-              },
-            })
-          : await setMcpOverride({
-              environmentId: props.environmentId,
-              input: {
-                threadId: props.threadId,
-                mcpServerId: target.id as ProviderMcpServer["id"],
-                state: target.state,
-                expectedRevision: snapshot.overrideRevision,
-              },
-            });
+      const result = props.durable
+        ? await refresh({
+            environmentId: props.environmentId,
+            input: { threadId: props.threadId, domain },
+          })
+        : await refreshPreview({
+            environmentId: props.environmentId,
+            input: {
+              threadId: props.threadId,
+              projectId: props.projectId!,
+              providerInstanceId: props.providerInstanceId!,
+              domain,
+            },
+          });
+      setRefreshing((current) => {
+        const next = new Set(current);
+        next.delete(domain);
+        return next;
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        setActionError(
+          errorMessage(squashAtomCommandFailure(result), `Could not refresh ${domain}.`),
+        );
+      }
+    },
+    [
+      props.durable,
+      props.environmentId,
+      props.projectId,
+      props.providerInstanceId,
+      props.threadId,
+      refresh,
+      refreshPreview,
+      refreshing,
+    ],
+  );
+
+  useEffect(() => {
+    if (!props.snapshot) return;
+    let shouldRefresh = false;
+    let changed = false;
+    const next = { ...authStates };
+    for (const server of props.snapshot.mcpServers) {
+      const state = authStates[server.id];
+      if (!state) continue;
+      const advanced = advanceMcpAuthState(state, server);
+      shouldRefresh ||= advanced.refresh;
+      if (advanced.state === null) {
+        delete next[server.id];
+        changed = true;
+      } else if (advanced.state !== state) {
+        next[server.id] = advanced.state;
+        changed = true;
+      }
+    }
+    if (changed) setAuthStates(next);
+    if (shouldRefresh) void runRefresh("mcp");
+  }, [authStates, props.snapshot, runRefresh]);
+
+  const setMcp = useCallback(
+    async (server: ProviderMcpServer, state: ProviderExtensionOverrideState) => {
+      if (!server.toggleable) return;
+      if (!props.durable) {
+        props.onSetDraftMcpOverride(server.id, state);
+        return;
+      }
+      const snapshot = props.snapshot;
+      if (!snapshot || mutationRevision !== null) return;
+      setActionError(null);
+      setMutationRevision(snapshot.overrideRevision + 1);
+      const result = await setMcpOverride({
+        environmentId: props.environmentId,
+        input: {
+          threadId: props.threadId,
+          mcpServerId: server.id,
+          state,
+          expectedRevision: snapshot.overrideRevision,
+        },
+      });
       if (result._tag === "Failure") {
         setMutationRevision(null);
-        if (!isAtomCommandInterrupted(result))
+        if (!isAtomCommandInterrupted(result)) {
           setActionError(
-            errorMessage(
-              squashAtomCommandFailure(result),
-              "Could not update this thread override.",
-            ),
+            errorMessage(squashAtomCommandFailure(result), "Could not update this MCP override."),
           );
+        }
       }
     },
     [
       mutationRevision,
       props.durable,
       props.environmentId,
+      props.onSetDraftMcpOverride,
       props.snapshot,
       props.threadId,
       setMcpOverride,
-      setSkillOverride,
     ],
   );
-  const setSkill = useCallback(
-    (skill: ProviderSkill, state: ProviderExtensionOverrideState) => {
-      void runMutation({ kind: "skill", id: skill.id, state });
-    },
-    [runMutation],
-  );
-  const setMcp = useCallback(
-    (server: ProviderMcpServer, state: ProviderExtensionOverrideState) => {
-      void runMutation({ kind: "mcp", id: server.id, state });
-    },
-    [runMutation],
-  );
 
-  const runRefresh = useCallback(
-    async (domain: ThreadExtensionsRefreshDomain) => {
-      if (!props.durable || refreshing.has(domain)) return;
-      setRefreshing((current) => new Set(current).add(domain));
+  const reconnect = useCallback(
+    async (server: ProviderMcpServer) => {
+      if (!props.durable) return;
       setActionError(null);
-      const result = await refresh({
-        environmentId: props.environmentId,
-        input: { threadId: props.threadId, domain },
-      });
-      setRefreshing((current) => {
-        const next = new Set(current);
-        next.delete(domain);
-        return next;
-      });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result))
-        setActionError(
-          errorMessage(squashAtomCommandFailure(result), `Could not refresh ${domain}.`),
-        );
-    },
-    [props.durable, props.environmentId, props.threadId, refresh, refreshing],
-  );
-
-  const runMcpAction = useCallback(
-    async (kind: "reconnect" | "auth", server: ProviderMcpServer) => {
-      setActionError(null);
-      const input = {
+      const result = await reconnectMcp({
         environmentId: props.environmentId,
         input: { threadId: props.threadId, mcpServerId: server.id },
-      };
-      const result = kind === "reconnect" ? await reconnectMcp(input) : await beginMcpAuth(input);
-      if (result._tag === "Failure") {
-        if (!isAtomCommandInterrupted(result))
-          setActionError(
-            errorMessage(
-              squashAtomCommandFailure(result),
-              `Could not ${kind === "auth" ? "authenticate" : "reconnect"} ${server.name}.`,
-            ),
-          );
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        setActionError(
+          errorMessage(squashAtomCommandFailure(result), `Could not reconnect ${server.name}.`),
+        );
+      }
+    },
+    [props.durable, props.environmentId, props.threadId, reconnectMcp],
+  );
+
+  const authenticate = useCallback(
+    async (server: ProviderMcpServer) => {
+      if (
+        authStates[server.id]?.phase === "beginning" ||
+        authStates[server.id]?.phase === "waiting"
+      ) {
         return;
       }
-      if (kind === "auth" && "authorizationUrl" in result.value && result.value.authorizationUrl) {
+      if (!props.durable && (!props.projectId || !props.providerInstanceId)) return;
+      setActionError(null);
+      setAuthStates((current) => ({ ...current, [server.id]: { phase: "beginning" } }));
+      const result = await beginMcpAuth({
+        environmentId: props.environmentId,
+        input: {
+          threadId: props.threadId,
+          mcpServerId: server.id,
+          ...(!props.durable
+            ? {
+                projectId: props.projectId!,
+                providerInstanceId: props.providerInstanceId!,
+              }
+            : {}),
+        },
+      });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          setAuthStates((current) => ({
+            ...current,
+            [server.id]: {
+              phase: "error",
+              message: errorMessage(
+                squashAtomCommandFailure(result),
+                `Could not authenticate ${server.name}.`,
+              ),
+            },
+          }));
+        }
+        return;
+      }
+      const authorizationUrl = result.value.authorizationUrl;
+      if (!authorizationUrl) {
+        setAuthStates((current) => ({
+          ...current,
+          [server.id]: { phase: "error", message: "The provider did not return a login URL." },
+        }));
+        return;
+      }
+      setAuthStates((current) => ({
+        ...current,
+        [server.id]: {
+          phase: "waiting",
+          authorizationUrl,
+          ...(server.error ? { baselineError: server.error } : {}),
+        },
+      }));
+      if (props.canOpenAuthLocally) {
         try {
-          await readLocalApi()?.shell.openExternal(result.value.authorizationUrl);
+          const localApi = readLocalApi();
+          if (localApi) {
+            await localApi.shell.openExternal(authorizationUrl);
+          } else {
+            const opened = window.open(authorizationUrl, "_blank", "noopener,noreferrer");
+            if (!opened) throw new Error("The browser blocked the login window.");
+          }
         } catch (error) {
-          setActionError(errorMessage(error, `Could not open authentication for ${server.name}.`));
+          setAuthStates((current) => ({
+            ...current,
+            [server.id]: {
+              phase: "error",
+              message: errorMessage(error, `Could not open authentication for ${server.name}.`),
+              authorizationUrl,
+            },
+          }));
         }
       }
     },
-    [beginMcpAuth, props.environmentId, props.threadId, reconnectMcp],
+    [
+      authStates,
+      beginMcpAuth,
+      props.canOpenAuthLocally,
+      props.durable,
+      props.environmentId,
+      props.projectId,
+      props.providerInstanceId,
+      props.threadId,
+    ],
   );
-  const reconnect = useCallback(
-    (server: ProviderMcpServer) => {
-      void runMcpAction("reconnect", server);
-    },
-    [runMcpAction],
-  );
-  const authenticate = useCallback(
-    (server: ProviderMcpServer) => {
-      void runMcpAction("auth", server);
-    },
-    [runMcpAction],
-  );
+
+  const copyAuthUrl = useCallback((url: string) => {
+    if (!navigator.clipboard) {
+      setActionError("Clipboard access is unavailable. Copy the URL from the row instead.");
+      return;
+    }
+    void navigator.clipboard.writeText(url).catch((error) => {
+      setActionError(errorMessage(error, "Could not copy the authentication URL."));
+    });
+  }, []);
 
   const retry = useCallback(() => {
     if (!props.snapshot) return;
     const target = extensionRetryTarget(props.snapshot);
-    if (target) void runMutation(target);
-  }, [props.snapshot, runMutation]);
+    const server = target
+      ? displayedMcp.find((candidate) => candidate.id === target.id)
+      : undefined;
+    if (target?.kind === "mcp" && server) void setMcp(server, target.state);
+  }, [displayedMcp, props.snapshot, setMcp]);
 
   const errors = [
     ...new Map(
@@ -458,6 +576,7 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
       ]),
     ).values(),
   ];
+  const mutationDisabled = mutationRevision !== null;
   const retryable = errors.some((error) => error.retryable);
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-background">
@@ -489,18 +608,11 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
           />
         </label>
         <p className="mt-2 text-[.68rem] leading-relaxed text-muted-foreground">
-          Disabling controls future availability for this thread. It does not erase skill
-          instructions or MCP history already in the conversation.
+          MCP changes control future availability and do not erase earlier conversation history.
         </p>
       </div>
       <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-5 p-4">
-          {!props.durable ? (
-            <div className="rounded-lg border border-info/25 bg-info/5 p-3 text-xs text-info-foreground">
-              Send the first message to create this thread before changing overrides. The contextual
-              inventory below is read-only.
-            </div>
-          ) : null}
           {pending ? (
             <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs text-warning-foreground">
               Revision {props.snapshot?.overrideRevision} is saved and pending
@@ -529,86 +641,8 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
             </div>
           ) : null}
           {props.isLoading && !props.snapshot ? (
-            <p className="text-xs text-muted-foreground">Loading contextual extensions…</p>
+            <p className="text-xs text-muted-foreground">Discovering contextual extensions…</p>
           ) : null}
-
-          <section aria-labelledby="extensions-skills-heading">
-            <div className="mb-2 flex items-center gap-2">
-              <div className="min-w-0 flex-1">
-                <h3
-                  id="extensions-skills-heading"
-                  className="text-xs font-semibold uppercase tracking-wider"
-                >
-                  Skills
-                </h3>
-                <p className="text-[.68rem] text-muted-foreground">
-                  {props.snapshot?.skills.length ?? 0} discovered
-                </p>
-              </div>
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={
-                  !props.durable ||
-                  !props.snapshot?.capabilities.skills.refresh ||
-                  refreshing.has("skills") ||
-                  props.snapshot?.loading.skills
-                }
-                onClick={() => void runRefresh("skills")}
-              >
-                <RefreshCw />
-                {refreshing.has("skills") || props.snapshot?.loading.skills
-                  ? "Refreshing"
-                  : "Refresh"}
-              </Button>
-            </div>
-            {props.snapshot && !props.snapshot.capabilities.skills.inventory ? (
-              <div className="rounded-lg border border-border/65 p-3 text-xs text-muted-foreground">
-                {props.snapshot.provider} does not expose contextual skill inventory yet.
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {props.snapshot && !props.snapshot.capabilities.skills.threadOverride ? (
-                  <p className="rounded-lg border border-border/65 p-3 text-xs text-muted-foreground">
-                    {props.snapshot.provider} exposes these skills but does not support per-thread
-                    skill controls.
-                  </p>
-                ) : null}
-                {SKILL_GROUPS.map((group) => {
-                  const groupSkills = filteredSkills.filter((skill) =>
-                    (group.scopes as readonly string[]).includes(skill.scope),
-                  );
-                  if (groupSkills.length === 0) return null;
-                  return (
-                    <div key={group.id}>
-                      <h4 className="mb-1.5 text-[.68rem] font-medium text-muted-foreground">
-                        {group.label} · {groupSkills.length}
-                      </h4>
-                      <div className="space-y-1.5">
-                        {groupSkills.map((skill) => (
-                          <SkillRow
-                            key={skill.id}
-                            skill={skill}
-                            disabled={
-                              mutationDisabled ||
-                              !props.snapshot?.capabilities.skills.threadOverride
-                            }
-                            pending={pending && skill.threadOverride !== "inherit"}
-                            onSet={setSkill}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-                {filteredSkills.length === 0 ? (
-                  <p className="rounded-lg border border-border/65 p-3 text-xs text-muted-foreground">
-                    No matching skills. Disabled skills remain searchable here.
-                  </p>
-                ) : null}
-              </div>
-            )}
-          </section>
 
           <section aria-labelledby="extensions-mcp-heading">
             <div className="mb-2 flex items-center gap-2">
@@ -627,7 +661,6 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
                 size="xs"
                 variant="outline"
                 disabled={
-                  !props.durable ||
                   !props.snapshot?.capabilities.mcp.inventory ||
                   refreshing.has("mcp") ||
                   props.snapshot?.loading.mcp
@@ -660,12 +693,20 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
                   <McpRow
                     key={server.id}
                     server={server}
+                    durable={props.durable}
                     disabled={mutationDisabled || !props.snapshot?.capabilities.mcp.threadOverride}
-                    pending={pending && server.threadOverride !== "inherit"}
+                    pending={
+                      props.durable
+                        ? pending && server.threadOverride !== "inherit"
+                        : props.draftMcpOverrides[server.id] !== undefined
+                    }
+                    authState={authStates[server.id] ?? null}
+                    canOpenAuthLocally={props.canOpenAuthLocally}
                     capabilities={props.snapshot!.capabilities.mcp}
-                    onSet={setMcp}
-                    onReconnect={reconnect}
-                    onAuthenticate={authenticate}
+                    onSet={(target, state) => void setMcp(target, state)}
+                    onReconnect={(target) => void reconnect(target)}
+                    onAuthenticate={(target) => void authenticate(target)}
+                    onCopyAuthUrl={copyAuthUrl}
                   />
                 ))}
                 {filteredMcp.length === 0 ? (
@@ -675,6 +716,68 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
                 ) : null}
               </div>
             )}
+          </section>
+
+          <section aria-labelledby="extensions-skills-heading">
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 text-left"
+              aria-expanded={!skillsCollapsed}
+              aria-controls="extensions-skills-content"
+              onClick={() => setSkillsCollapsed(panelRef, !skillsCollapsed)}
+            >
+              {skillsCollapsed ? (
+                <ChevronRight className="size-3.5" />
+              ) : (
+                <ChevronDown className="size-3.5" />
+              )}
+              <div className="min-w-0 flex-1">
+                <h3
+                  id="extensions-skills-heading"
+                  className="text-xs font-semibold uppercase tracking-wider"
+                >
+                  Skills
+                </h3>
+                <p className="text-[.68rem] text-muted-foreground">
+                  {props.snapshot?.skills.length ?? 0} discovered · inventory only
+                </p>
+              </div>
+            </button>
+            {!skillsCollapsed ? (
+              <div id="extensions-skills-content" className="mt-2">
+                {props.snapshot && !props.snapshot.capabilities.skills.inventory ? (
+                  <div className="rounded-lg border border-border/65 p-3 text-xs text-muted-foreground">
+                    {props.snapshot.provider} does not expose contextual skill inventory yet.
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {SKILL_GROUPS.map((group) => {
+                      const groupSkills = filteredSkills.filter((skill) =>
+                        (group.scopes as readonly string[]).includes(skill.scope),
+                      );
+                      if (groupSkills.length === 0) return null;
+                      return (
+                        <div key={group.id}>
+                          <h4 className="mb-1.5 text-[.68rem] font-medium text-muted-foreground">
+                            {group.label} · {groupSkills.length}
+                          </h4>
+                          <div className="space-y-1.5">
+                            {groupSkills.map((skill) => (
+                              <SkillRow key={skill.id} skill={skill} />
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {filteredSkills.length === 0 ? (
+                      <p className="rounded-lg border border-border/65 p-3 text-xs text-muted-foreground">
+                        No matching skills.
+                      </p>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            ) : null}
           </section>
         </div>
       </ScrollArea>

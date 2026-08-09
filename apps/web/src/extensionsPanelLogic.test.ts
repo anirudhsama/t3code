@@ -8,10 +8,14 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  advanceMcpAuthState,
+  applyDraftMcpOverrides,
+  canOpenMcpAuthOnClient,
   extensionPending,
   extensionRetryTarget,
   filterExtensionMcpServers,
   filterExtensionSkills,
+  mcpStatusLabel,
 } from "./extensionsPanelLogic";
 
 function snapshot(): ThreadExtensionsSnapshot {
@@ -54,6 +58,7 @@ function snapshot(): ThreadExtensionsSnapshot {
         toggleable: false,
         startupStatus: "ready",
         authStatus: "not-required",
+        statusObserved: true,
         toolCount: 3,
         resourceCount: 0,
         resourceTemplateCount: 0,
@@ -82,10 +87,88 @@ describe("extensions panel logic", () => {
   it("derives pending and a semantics-preserving retry target from revisions", () => {
     const value = snapshot();
     expect(extensionPending(value)).toBe(true);
-    expect(extensionRetryTarget(value)).toEqual({
-      kind: "skill",
-      id: value.skills[0]!.id,
-      state: "disabled",
+    expect(extensionRetryTarget(value)).toBeNull();
+  });
+
+  it("applies draft MCP intents without mutating the preview snapshot", () => {
+    const source = {
+      ...snapshot().mcpServers[0]!,
+      id: ProviderExtensionItemId.make("docs"),
+      name: "docs",
+      managed: false,
+      toggleable: true,
+    };
+    const [projected] = applyDraftMcpOverrides([source], {
+      [ProviderExtensionItemId.make("docs")]: "disabled",
     });
+
+    expect(projected).toMatchObject({ threadOverride: "disabled", effectiveEnabled: false });
+    expect(source).toMatchObject({ threadOverride: "inherit", effectiveEnabled: true });
+  });
+
+  it("labels an empty compose-time result as not started, never failed", () => {
+    const server = {
+      ...snapshot().mcpServers[0]!,
+      startupStatus: "failed" as const,
+      statusObserved: true,
+    };
+    expect(mcpStatusLabel(server, false)).toBe("Not started");
+    expect(mcpStatusLabel({ ...server, startupStatus: "unknown" }, false)).toBe("Not started");
+    expect(
+      mcpStatusLabel({ ...server, startupStatus: "unknown", statusObserved: false }, false),
+    ).toBeNull();
+    expect(
+      mcpStatusLabel({ ...server, startupStatus: "disabled", statusObserved: false }, true),
+    ).toBeNull();
+  });
+
+  it("settles auth waiting state on completion and exposes timeout failures", () => {
+    const server = snapshot().mcpServers[0]!;
+    const waiting = {
+      phase: "waiting" as const,
+      authorizationUrl: "https://example.test/login",
+    };
+    expect(advanceMcpAuthState(waiting, { ...server, authStatus: "authenticated" })).toEqual({
+      state: null,
+      refresh: true,
+    });
+    expect(
+      advanceMcpAuthState(waiting, {
+        ...server,
+        authStatus: "needs-auth",
+        error: "timed out waiting for OAuth callback",
+      }),
+    ).toEqual({
+      state: {
+        phase: "error",
+        message: "timed out waiting for OAuth callback",
+        authorizationUrl: "https://example.test/login",
+      },
+      refresh: false,
+    });
+  });
+
+  it("opens loopback auth only for host-local connection targets", () => {
+    expect(
+      canOpenMcpAuthOnClient({
+        target: { _tag: "PrimaryConnectionTarget" },
+        electron: false,
+        hostname: "127.0.0.1",
+      }),
+    ).toBe(true);
+    expect(
+      canOpenMcpAuthOnClient({
+        target: { _tag: "RelayConnectionTarget" },
+        electron: true,
+        hostname: "localhost",
+      }),
+    ).toBe(false);
+    expect(
+      canOpenMcpAuthOnClient({
+        target: { _tag: "PrimaryConnectionTarget" },
+        electron: false,
+        hostname: "app.t3.codes",
+      }),
+    ).toBe(false);
   });
 });

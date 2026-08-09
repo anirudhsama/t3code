@@ -18,6 +18,21 @@ beforeEach(() => {
 });
 
 describe("rightPanelStore", () => {
+  it("persists the Skills collapse state with the extensions surface", () => {
+    useRightPanelStore.getState().open(refA, "extensions");
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)
+        .extensionsSkillsCollapsed ?? true,
+    ).toBe(true);
+
+    useRightPanelStore.getState().setExtensionsSkillsCollapsed(refA, false);
+
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)
+        .extensionsSkillsCollapsed,
+    ).toBe(false);
+  });
+
   it("drops the legacy singleton terminal surface during migration", () => {
     expect(
       migratePersistedRightPanelState({
