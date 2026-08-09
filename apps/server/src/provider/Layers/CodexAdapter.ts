@@ -46,6 +46,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
@@ -58,6 +59,7 @@ import {
   ProviderAdapterRequestError,
   ProviderAdapterStaleSkillSelectionError,
   ProviderAdapterProcessError,
+  ProviderMcpAuthError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
@@ -97,6 +99,84 @@ const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 const MANAGED_T3_MCP_SERVER_ID = ProviderExtensionItemId.make("t3-code");
+
+export interface McpOAuthCallbackTarget {
+  readonly hostname: "127.0.0.1" | "localhost";
+  readonly port: string;
+  readonly pathname: string;
+}
+
+function parseSafeLoopbackUrl(
+  value: string,
+): (URL & { hostname: McpOAuthCallbackTarget["hostname"] }) | null {
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      parsed.protocol !== "http:" ||
+      (hostname !== "127.0.0.1" && hostname !== "localhost") ||
+      parsed.port.length === 0 ||
+      parsed.username.length > 0 ||
+      parsed.password.length > 0 ||
+      parsed.hash.length > 0
+    ) {
+      return null;
+    }
+    return parsed as URL & { hostname: McpOAuthCallbackTarget["hostname"] };
+  } catch {
+    return null;
+  }
+}
+
+export function parseMcpOAuthCallbackTarget(
+  authorizationUrl: string,
+): McpOAuthCallbackTarget | null {
+  try {
+    const authorization = new URL(authorizationUrl);
+    const redirectUris = authorization.searchParams.getAll("redirect_uri");
+    if (redirectUris.length !== 1) return null;
+    const redirect = parseSafeLoopbackUrl(redirectUris[0]!);
+    return redirect
+      ? {
+          hostname: redirect.hostname,
+          port: redirect.port,
+          pathname: redirect.pathname,
+        }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function matchesMcpOAuthCallbackTarget(
+  callbackUrl: string,
+  target: McpOAuthCallbackTarget,
+): boolean {
+  const callback = parseSafeLoopbackUrl(callbackUrl);
+  return (
+    callback !== null &&
+    callback.hostname === target.hostname &&
+    callback.port === target.port &&
+    callback.pathname === target.pathname
+  );
+}
+
+export const relayMcpOAuthCallbackRequest = (
+  callbackUrl: string,
+): Effect.Effect<void, ProviderMcpAuthError> =>
+  HttpClient.get(callbackUrl).pipe(
+    Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+    Effect.provide(FetchHttpClient.layer),
+    Effect.asVoid,
+    Effect.mapError(
+      () =>
+        new ProviderMcpAuthError({
+          reason: "relay-failed",
+          detail: "Could not deliver the redirect to the pending authentication callback.",
+          retryable: true,
+        }),
+    ),
+  );
 
 export function compileCodexExtensionConfig(input: {
   readonly skillOverrides: ProviderSkillOverrides;
@@ -406,7 +486,18 @@ export interface CodexAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly managementIdleTimeoutMs?: number;
+  readonly relayMcpOAuthCallback?: (
+    callbackUrl: string,
+  ) => Effect.Effect<void, ProviderMcpAuthError>;
 }
+
+type McpOAuthLoginState =
+  | {
+      readonly status: "pending";
+      readonly cwd: string;
+      readonly target: McpOAuthCallbackTarget;
+    }
+  | { readonly status: "completed"; readonly cwd: string };
 
 interface CodexAdapterSessionContext {
   readonly threadId: ThreadId;
@@ -2006,6 +2097,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const mcpStatusCache = makeCodexInventoryCacheState<readonly [string, CodexMcpLiveStatus]>();
   const mcpNotificationStatus = new Map<ThreadId, Map<string, Partial<CodexMcpLiveStatus>>>();
   const mcpNotificationRevision = new Map<ThreadId, number>();
+  const mcpOAuthLogins = new Map<ThreadId, Map<string, McpOAuthLoginState>>();
   const desiredExtensionOverrides = new Map<ThreadId, ProviderExtensionReconciliationInput>();
   const extensionReconciliationStates = new Map<ThreadId, ProviderExtensionReconciliationState>();
   let nextInventoryRequestId = 0;
@@ -2017,6 +2109,26 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const cacheKey = (cwd: string) => `${boundInstanceId}\u0000${cwd}`;
   const canonicalizeCwd = (cwd: string) =>
     fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => cwd));
+
+  const mcpOAuthLoginState = (threadId: ThreadId, mcpServerId: string) =>
+    mcpOAuthLogins.get(threadId)?.get(mcpServerId);
+
+  const setMcpOAuthLoginState = (
+    threadId: ThreadId,
+    mcpServerId: string,
+    state: McpOAuthLoginState,
+  ) => {
+    const threadLogins = mcpOAuthLogins.get(threadId) ?? new Map<string, McpOAuthLoginState>();
+    threadLogins.set(mcpServerId, state);
+    mcpOAuthLogins.set(threadId, threadLogins);
+  };
+
+  const clearMcpOAuthLoginState = (threadId: ThreadId, mcpServerId: string) => {
+    const threadLogins = mcpOAuthLogins.get(threadId);
+    if (!threadLogins) return;
+    threadLogins.delete(mcpServerId);
+    if (threadLogins.size === 0) mcpOAuthLogins.delete(threadId);
+  };
 
   const reconciliationState = (threadId: ThreadId): ProviderExtensionReconciliationState =>
     extensionReconciliationStates.get(threadId) ?? { appliedOverrideRevision: 0 };
@@ -2230,6 +2342,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     mcpStatusCache.cache.delete(session.threadId);
     mcpNotificationStatus.delete(session.threadId);
     mcpNotificationRevision.delete(session.threadId);
+    mcpOAuthLogins.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
@@ -2594,21 +2707,77 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const mcpFacet = {
     inventory: readMcpInventory,
     refresh: (input) => readMcpInventory({ ...input, forceReload: true }),
-    authenticate: (input) =>
-      ensureExtensionContext(input).pipe(
-        Effect.flatMap((context) =>
-          withManagementContext(
-            context,
-            context.runtime
-              .beginMcpAuth(input.mcpServerId)
-              .pipe(
-                Effect.mapError((cause) =>
-                  mapCodexRuntimeError(input.threadId, "mcpServer/oauth/login", cause),
-                ),
-              ),
+    authenticate: Effect.fn("CodexAdapter.authenticateMcp")(function* (input) {
+      if (mcpOAuthLoginState(input.threadId, input.mcpServerId)?.status === "pending") {
+        return yield* new ProviderMcpAuthError({
+          reason: "duplicate-pending",
+          detail: "Authentication is already pending for this MCP server.",
+          retryable: false,
+        });
+      }
+      const context = yield* ensureExtensionContext(input);
+      const result = yield* withManagementContext(
+        context,
+        context.runtime
+          .beginMcpAuth(input.mcpServerId)
+          .pipe(
+            Effect.mapError((cause) =>
+              mapCodexRuntimeError(input.threadId, "mcpServer/oauth/login", cause),
+            ),
           ),
-        ),
-      ),
+      );
+      const target = parseMcpOAuthCallbackTarget(result.authorizationUrl);
+      if (!target) {
+        return yield* new ProviderMcpAuthError({
+          reason: "unsafe-redirect",
+          detail: "The provider did not return a safe loopback authentication callback.",
+          retryable: true,
+        });
+      }
+      setMcpOAuthLoginState(input.threadId, input.mcpServerId, {
+        status: "pending",
+        cwd: context.cwd,
+        target,
+      });
+      return result;
+    }),
+    relayAuthenticationCallback: Effect.fn("CodexAdapter.relayMcpAuthCallback")(function* (input) {
+      const login = mcpOAuthLoginState(input.threadId, input.mcpServerId);
+      if (!login || login.cwd !== input.cwd) {
+        return yield* new ProviderMcpAuthError({
+          reason: "no-pending",
+          detail: "There is no pending authentication for this MCP server.",
+          retryable: true,
+        });
+      }
+      if (login.status === "completed") {
+        return yield* new ProviderMcpAuthError({
+          reason: "already-completed",
+          detail: "Authentication has already completed for this MCP server.",
+          retryable: false,
+        });
+      }
+      if (!matchesMcpOAuthCallbackTarget(input.callbackUrl, login.target)) {
+        return yield* new ProviderMcpAuthError({
+          reason: "invalid-callback",
+          detail: "The redirect URL does not match the pending authentication callback.",
+          retryable: true,
+        });
+      }
+      const context = sessions.get(input.threadId);
+      if (!context || context.stopped) {
+        clearMcpOAuthLoginState(input.threadId, input.mcpServerId);
+        return yield* new ProviderMcpAuthError({
+          reason: "no-pending",
+          detail: "There is no pending authentication for this MCP server.",
+          retryable: true,
+        });
+      }
+      yield* withManagementContext(
+        context,
+        (options?.relayMcpOAuthCallback ?? relayMcpOAuthCallbackRequest)(input.callbackUrl),
+      );
+    }),
   } satisfies ProviderExtensionMcpFacet;
 
   function handleExtensionRuntimeEvent(event: ProviderEvent): Effect.Effect<void> {
@@ -2665,6 +2834,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       }
 
       const name = startup?.name ?? oauth!.name;
+      if (oauth) {
+        const login = mcpOAuthLoginState(context.threadId, name);
+        if (oauth.success && login?.status === "pending") {
+          setMcpOAuthLoginState(context.threadId, name, {
+            status: "completed",
+            cwd: login.cwd,
+          });
+        } else {
+          clearMcpOAuthLoginState(context.threadId, name);
+        }
+      }
       const threadStatuses = mcpNotificationStatus.get(context.threadId) ?? new Map();
       const previous = threadStatuses.get(name) ?? {};
       const { error: _previousError, ...previousWithoutError } = previous;

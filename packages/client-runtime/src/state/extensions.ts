@@ -116,5 +116,11 @@ export function createExtensionsEnvironmentAtoms<R, E>(
       scheduler: actionScheduler,
       concurrency: actionConcurrency,
     }),
+    relayMcpAuthCallback: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:extensions:relay-mcp-auth-callback",
+      tag: EXTENSIONS_WS_METHODS.relayMcpAuthCallback,
+      scheduler: actionScheduler,
+      concurrency: actionConcurrency,
+    }),
   };
 }

@@ -819,6 +819,15 @@ export const WsExtensionsBeginMcpAuthRpc = Rpc.make(EXTENSIONS_WS_METHODS.beginM
   error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
 });
 
+export const WsExtensionsRelayMcpAuthCallbackRpc = Rpc.make(
+  EXTENSIONS_WS_METHODS.relayMcpAuthCallback,
+  {
+    payload: ThreadExtensionsRpcSchemas.relayMcpAuthCallback.input,
+    success: ThreadExtensionsRpcSchemas.relayMcpAuthCallback.output,
+    error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: Schema.Struct({}),
   success: TerminalEvent,
@@ -959,4 +968,5 @@ export const WsRpcGroup = RpcGroup.make(
   WsExtensionsSubscribePreviewRpc,
   WsExtensionsReconnectMcpRpc,
   WsExtensionsBeginMcpAuthRpc,
+  WsExtensionsRelayMcpAuthCallbackRpc,
 );

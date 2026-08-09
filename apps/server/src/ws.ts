@@ -1511,6 +1511,19 @@ const makeWsRpcLayer = (
               ),
             { "rpc.aggregate": "extensions" },
           ),
+        [EXTENSIONS_WS_METHODS.relayMcpAuthCallback]: (input) =>
+          observeRpcEffect(
+            EXTENSIONS_WS_METHODS.relayMcpAuthCallback,
+            threadExtensions.relayMcpAuthCallback?.(input) ??
+              Effect.fail(
+                new ThreadExtensionsRpcError({
+                  reason: "unsupported",
+                  message: "This server does not support remote MCP authentication callbacks.",
+                  retryable: false,
+                }),
+              ),
+            { "rpc.aggregate": "extensions" },
+          ),
         [WS_METHODS.serverProbe]: (_input) =>
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
             "rpc.aggregate": "server",

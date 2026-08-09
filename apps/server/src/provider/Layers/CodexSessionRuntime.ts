@@ -144,6 +144,8 @@ export interface CodexThreadSnapshot {
   readonly turns: ReadonlyArray<CodexThreadTurnSnapshot>;
 }
 
+export const MCP_OAUTH_TIMEOUT_SECS = 10 * 60;
+
 export interface CodexSessionRuntimeShape {
   readonly initialize: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly start: (
@@ -1862,7 +1864,7 @@ export const makeCodexSessionRuntime = (
           const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
           return yield* client.request("mcpServer/oauth/login", {
             name,
-            timeoutSecs: 120,
+            timeoutSecs: MCP_OAUTH_TIMEOUT_SECS,
             ...(providerThreadId ? { threadId: providerThreadId } : {}),
           });
         }),

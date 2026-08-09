@@ -38,6 +38,7 @@ export const RPC_REQUIRED_SCOPES = {
   [EXTENSIONS_WS_METHODS.subscribePreview]: AuthOrchestrationReadScope,
   [EXTENSIONS_WS_METHODS.reconnectMcp]: AuthOrchestrationOperateScope,
   [EXTENSIONS_WS_METHODS.beginMcpAuth]: AuthOrchestrationOperateScope,
+  [EXTENSIONS_WS_METHODS.relayMcpAuthCallback]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverProbe]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetConfig]: AuthOrchestrationReadScope,
   [WS_METHODS.serverRefreshProviders]: AuthOrchestrationOperateScope,

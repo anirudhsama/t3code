@@ -35,6 +35,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { FetchHttpClient } from "effect/unstable/http";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
@@ -45,6 +46,7 @@ import {
   type ProviderAdapterError,
   ProviderAdapterStaleSkillSelectionError,
   ProviderAdapterValidationError,
+  ProviderMcpAuthError,
 } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
@@ -60,7 +62,10 @@ import {
   CODEX_EXTENSION_CAPABILITIES,
   compileCodexExtensionConfig,
   makeCodexAdapter,
+  matchesMcpOAuthCallbackTarget,
   parseCodexMcpDefinitions,
+  parseMcpOAuthCallbackTarget,
+  relayMcpOAuthCallbackRequest,
 } from "./CodexAdapter.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const isProviderAdapterStaleSkillSelectionError = Schema.is(
@@ -1318,7 +1323,12 @@ function withExtensionsTestAdapter<A>(
   use: (
     adapter: CodexAdapterShape & { readonly extensions: ProviderExtensionsShape },
   ) => Effect.Effect<A, ProviderAdapterError, Scope.Scope>,
-  options?: { readonly managementIdleTimeoutMs?: number },
+  options?: {
+    readonly managementIdleTimeoutMs?: number;
+    readonly relayMcpOAuthCallback?: (
+      callbackUrl: string,
+    ) => Effect.Effect<void, ProviderMcpAuthError>;
+  },
 ) {
   return Effect.gen(function* () {
     const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
@@ -1362,6 +1372,186 @@ it("compiles sparse Codex overrides and drops the managed t3-code MCP override",
       mcp_servers: {
         postgres: { enabled: true },
       },
+    },
+  );
+});
+
+it("accepts only the exact pending loopback callback target", () => {
+  const redirectUri = "http://127.0.0.1:43123/callback/nonce";
+  const target = parseMcpOAuthCallbackTarget(
+    `https://provider.example/authorize?redirect_uri=${encodeURIComponent(redirectUri)}`,
+  );
+  NodeAssert.ok(target);
+
+  const cases = [
+    ["http://127.0.0.1:43123/callback/nonce?code=opaque", true],
+    ["https://127.0.0.1:43123/callback/nonce?code=opaque", false],
+    ["http://localhost:43123/callback/nonce?code=opaque", false],
+    ["http://127.0.0.2:43123/callback/nonce?code=opaque", false],
+    ["http://127.0.0.1:43124/callback/nonce?code=opaque", false],
+    ["http://127.0.0.1:43123/callback/other?code=opaque", false],
+    ["http://user@127.0.0.1:43123/callback/nonce?code=opaque", false],
+    ["http://127.0.0.1:43123/callback/nonce?code=opaque#fragment", false],
+  ] as const;
+
+  for (const [callbackUrl, expected] of cases) {
+    NodeAssert.equal(matchesMcpOAuthCallbackTarget(callbackUrl, target), expected, callbackUrl);
+  }
+  NodeAssert.equal(
+    parseMcpOAuthCallbackTarget(
+      "https://provider.example/authorize?redirect_uri=https%3A%2F%2F127.0.0.1%3A43123%2Fcallback",
+    ),
+    null,
+  );
+});
+
+it.effect("relays the original callback query without following redirects", () => {
+  const calls: Array<{
+    readonly input: Parameters<typeof globalThis.fetch>[0];
+    readonly init: Parameters<typeof globalThis.fetch>[1];
+  }> = [];
+  const fetchImpl: typeof globalThis.fetch = Object.assign(
+    (
+      input: Parameters<typeof globalThis.fetch>[0],
+      init?: Parameters<typeof globalThis.fetch>[1],
+    ) => {
+      calls.push({ input, init });
+      return Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://should-not-be-followed.example" },
+        }),
+      );
+    },
+    { preconnect: globalThis.fetch.preconnect },
+  );
+  const callbackUrl =
+    "http://127.0.0.1:43123/callback/docs?code=opaque%2Fvalue&state=one&state=two";
+
+  return relayMcpOAuthCallbackRequest(callbackUrl).pipe(
+    Effect.provideService(FetchHttpClient.Fetch, fetchImpl),
+    Effect.tap(() =>
+      Effect.sync(() => {
+        NodeAssert.equal(calls.length, 1);
+        NodeAssert.equal(String(calls[0]!.input), callbackUrl);
+        NodeAssert.equal(calls[0]!.init?.redirect, "manual");
+      }),
+    ),
+  );
+});
+
+it.effect("tracks MCP OAuth begin, relay, completion, timeout, and retry", () => {
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtime.beginMcpAuthImpl.mockImplementation((name) => {
+      if (name === "unsafe") {
+        return Promise.resolve({
+          authorizationUrl:
+            "https://provider.example/authorize?redirect_uri=https%3A%2F%2Fexample.test%2Fcallback%3Fcode%3Dauthorization-secret",
+        });
+      }
+      const redirectUri = `http://127.0.0.1:43123/callback/${name}`;
+      return Promise.resolve({
+        authorizationUrl: `https://provider.example/authorize?redirect_uri=${encodeURIComponent(redirectUri)}`,
+      });
+    });
+  });
+  const relayed: Array<string> = [];
+  const threadId = asThreadId("thread-mcp-oauth-relay");
+  const input = {
+    threadId,
+    cwd: "/workspace/mcp-oauth",
+    mcpServerId: ProviderExtensionItemId.make("docs"),
+  } as const;
+
+  return withExtensionsTestAdapter(
+    runtimeFactory,
+    (adapter) =>
+      Effect.gen(function* () {
+        const noPending = yield* adapter.extensions.mcp!.relayAuthenticationCallback!({
+          ...input,
+          callbackUrl: "http://127.0.0.1:43123/callback/docs?code=opaque",
+        }).pipe(Effect.flip, Effect.orDie);
+        NodeAssert.equal(noPending._tag, "ProviderMcpAuthError");
+        NodeAssert.equal(noPending.reason, "no-pending");
+
+        yield* adapter.extensions.mcp!.authenticate!(input);
+
+        const duplicate = yield* adapter.extensions.mcp!.authenticate!(input).pipe(
+          Effect.flip,
+          Effect.orDie,
+        );
+        NodeAssert.equal(duplicate._tag, "ProviderMcpAuthError");
+        NodeAssert.equal(duplicate.reason, "duplicate-pending");
+
+        const mismatchSecret = "mismatch-secret";
+        const mismatch = yield* adapter.extensions.mcp!.relayAuthenticationCallback!({
+          ...input,
+          callbackUrl: `http://127.0.0.1:43124/callback/docs?code=${mismatchSecret}`,
+        }).pipe(Effect.flip, Effect.orDie);
+        NodeAssert.equal(mismatch._tag, "ProviderMcpAuthError");
+        NodeAssert.equal(mismatch.reason, "invalid-callback");
+        NodeAssert.doesNotMatch(mismatch.message, new RegExp(mismatchSecret));
+
+        const callbackUrl =
+          "http://127.0.0.1:43123/callback/docs?code=opaque%2Fvalue&state=one&state=two";
+        yield* adapter.extensions.mcp!.relayAuthenticationCallback!({ ...input, callbackUrl });
+        NodeAssert.deepStrictEqual(relayed, [callbackUrl]);
+
+        const runtime = runtimeFactory.lastRuntime;
+        NodeAssert.ok(runtime);
+        yield* runtime.emit({
+          id: asEventId("evt-mcp-oauth-relay-completed"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "mcpServer/oauthLogin/completed",
+          payload: { name: "docs", success: true, error: null },
+        });
+        yield* Effect.yieldNow;
+
+        const completed = yield* adapter.extensions.mcp!.relayAuthenticationCallback!({
+          ...input,
+          callbackUrl,
+        }).pipe(Effect.flip, Effect.orDie);
+        NodeAssert.equal(completed._tag, "ProviderMcpAuthError");
+        NodeAssert.equal(completed.reason, "already-completed");
+
+        const timeoutInput = {
+          ...input,
+          mcpServerId: ProviderExtensionItemId.make("timeout"),
+        };
+        yield* adapter.extensions.mcp!.authenticate!(timeoutInput);
+        yield* runtime.emit({
+          id: asEventId("evt-mcp-oauth-timeout"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "mcpServer/oauthLogin/completed",
+          payload: { name: "timeout", success: false, error: "timed out" },
+        });
+        yield* Effect.yieldNow;
+        yield* adapter.extensions.mcp!.authenticate!(timeoutInput);
+        NodeAssert.equal(
+          runtime.beginMcpAuthImpl.mock.calls.filter(([name]) => name === "timeout").length,
+          2,
+        );
+
+        const unsafeSecret = "authorization-secret";
+        const unsafe = yield* adapter.extensions.mcp!.authenticate!({
+          ...input,
+          mcpServerId: ProviderExtensionItemId.make("unsafe"),
+        }).pipe(Effect.flip, Effect.orDie);
+        NodeAssert.equal(unsafe._tag, "ProviderMcpAuthError");
+        NodeAssert.equal(unsafe.reason, "unsafe-redirect");
+        NodeAssert.doesNotMatch(unsafe.message, new RegExp(unsafeSecret));
+      }),
+    {
+      relayMcpOAuthCallback: (callbackUrl) =>
+        Effect.sync(() => {
+          relayed.push(callbackUrl);
+        }),
     },
   );
 });

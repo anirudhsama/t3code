@@ -9,6 +9,7 @@ import type {
   ProviderSkillOverrides,
   RuntimeMode,
   ThreadExtensionsMcpAuthResult,
+  ThreadExtensionsMcpAuthCallbackInput,
   ThreadExtensionsGetPreviewSnapshotInput,
   ThreadExtensionsMcpAuthInput,
   ThreadExtensionsRefreshDomain,
@@ -133,6 +134,12 @@ export interface ProviderExtensionMcpFacet {
   readonly authenticate?: (
     input: ProviderExtensionRuntimeContext & { readonly mcpServerId: ProviderExtensionItemId },
   ) => Effect.Effect<{ readonly authorizationUrl: string }, ProviderAdapterError>;
+  readonly relayAuthenticationCallback?: (
+    input: ProviderExtensionRuntimeContext & {
+      readonly mcpServerId: ProviderExtensionItemId;
+      readonly callbackUrl: string;
+    },
+  ) => Effect.Effect<void, ProviderAdapterError>;
 }
 
 export interface ProviderExtensionsShape {
@@ -177,6 +184,9 @@ export interface ThreadExtensionsShape {
   readonly beginMcpAuth?: (
     input: ThreadExtensionsMcpAuthInput,
   ) => Effect.Effect<ThreadExtensionsMcpAuthResult, ThreadExtensionsRpcError>;
+  readonly relayMcpAuthCallback?: (
+    input: ThreadExtensionsMcpAuthCallbackInput,
+  ) => Effect.Effect<ThreadExtensionsSnapshot, ThreadExtensionsRpcError>;
 }
 
 export class ThreadExtensions extends Context.Service<ThreadExtensions, ThreadExtensionsShape>()(

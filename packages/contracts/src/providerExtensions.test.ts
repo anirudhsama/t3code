@@ -151,6 +151,26 @@ const rpcRoundTrips = [
       mcpServerId: "github",
     },
   ),
+  roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.relayMcpAuthCallback.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.relayMcpAuthCallback.input),
+    {
+      threadId: "thread-1",
+      mcpServerId: "github",
+      callbackUrl: "http://127.0.0.1:43123/callback/state?code=secret",
+    },
+  ),
+  roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.relayMcpAuthCallback.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.relayMcpAuthCallback.input),
+    {
+      threadId: "thread-pending",
+      projectId: "project-1",
+      providerInstanceId: "codex",
+      mcpServerId: "github",
+      callbackUrl: "http://localhost:43123/callback/state?code=secret",
+    },
+  ),
 ];
 
 const streamRoundTrip = roundTrip(

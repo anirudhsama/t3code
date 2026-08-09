@@ -68,6 +68,27 @@ export class ProviderAdapterRequestError extends Schema.TaggedErrorClass<Provide
   }
 }
 
+/** Safe, provider-owned MCP OAuth lifecycle and callback-relay failure. */
+export class ProviderMcpAuthError extends Schema.TaggedErrorClass<ProviderMcpAuthError>()(
+  "ProviderMcpAuthError",
+  {
+    reason: Schema.Literals([
+      "duplicate-pending",
+      "no-pending",
+      "already-completed",
+      "invalid-callback",
+      "unsafe-redirect",
+      "relay-failed",
+    ]),
+    detail: Schema.String,
+    retryable: Schema.Boolean,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 /** Selected skill identity no longer resolves to an effectively enabled provider skill. */
 export class ProviderAdapterStaleSkillSelectionError extends Schema.TaggedErrorClass<ProviderAdapterStaleSkillSelectionError>()(
   "ProviderAdapterStaleSkillSelectionError",
@@ -208,6 +229,7 @@ export type ProviderAdapterError =
   | ProviderAdapterSessionNotFoundError
   | ProviderAdapterSessionClosedError
   | ProviderAdapterRequestError
+  | ProviderMcpAuthError
   | ProviderAdapterStaleSkillSelectionError
   | ProviderAdapterProcessError;
 

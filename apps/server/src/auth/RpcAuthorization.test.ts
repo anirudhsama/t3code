@@ -43,6 +43,7 @@ describe("RPC authorization scopes", () => {
       EXTENSIONS_WS_METHODS.refreshThread,
       EXTENSIONS_WS_METHODS.reconnectMcp,
       EXTENSIONS_WS_METHODS.beginMcpAuth,
+      EXTENSIONS_WS_METHODS.relayMcpAuthCallback,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
     }

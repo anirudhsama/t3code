@@ -19,12 +19,13 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import * as OrchestrationEngine from "../../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import type { ProviderAdapterError } from "../Errors.ts";
+import { ProviderMcpAuthError, type ProviderAdapterError } from "../Errors.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import * as ProviderInstanceRegistry from "../Services/ProviderInstanceRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
@@ -109,6 +110,27 @@ const snapshotError = (
 
 const errorMessage = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
+const isProviderMcpAuthError = Schema.is(ProviderMcpAuthError);
+
+const mapMcpAuthError = (
+  cause: ProviderAdapterError,
+  fallback: string,
+): ThreadExtensionsRpcError => {
+  if (isProviderMcpAuthError(cause)) {
+    return rpcError(
+      cause.reason === "invalid-callback"
+        ? "invalid-callback"
+        : cause.reason === "duplicate-pending" ||
+            cause.reason === "no-pending" ||
+            cause.reason === "already-completed"
+          ? "invalid-state"
+          : "provider-failed",
+      cause.detail,
+      { retryable: cause.retryable },
+    );
+  }
+  return rpcError("provider-failed", fallback, { retryable: true, cause });
+};
 
 const applySkillOverrides = (
   items: ReadonlyArray<ProviderSkillInventoryItem>,
@@ -597,10 +619,9 @@ export const makeThreadExtensions = Effect.fn("makeThreadExtensions")(
         mcpServerId: input.mcpServerId,
       }).pipe(
         Effect.mapError((cause) =>
-          rpcError(
-            "provider-failed",
+          mapMcpAuthError(
+            cause,
             `Could not begin authentication for MCP server '${input.mcpServerId}'.`,
-            { retryable: true, cause },
           ),
         ),
       );
@@ -617,6 +638,44 @@ export const makeThreadExtensions = Effect.fn("makeThreadExtensions")(
       };
     });
 
+    const relayMcpAuthCallback: NonNullable<ThreadExtensionsShape["relayMcpAuthCallback"]> =
+      Effect.fn("ThreadExtensions.relayMcpAuthCallback")(function* (input) {
+        const preview = input.projectId !== undefined && input.providerInstanceId !== undefined;
+        const context = preview
+          ? yield* resolvePreviewContext({
+              threadId: input.threadId,
+              projectId: input.projectId,
+              providerInstanceId: input.providerInstanceId,
+            })
+          : yield* resolveThreadContext(input.threadId);
+        const relay = context.instance.extensions?.mcp?.relayAuthenticationCallback;
+        if (!relay) {
+          return yield* rpcError(
+            "unsupported",
+            "This provider does not support remote MCP authentication callbacks.",
+          );
+        }
+        yield* relay({
+          ...context.runtime,
+          mcpServerId: input.mcpServerId,
+          callbackUrl: input.callbackUrl,
+        }).pipe(
+          Effect.mapError((cause) =>
+            mapMcpAuthError(
+              cause,
+              `Could not deliver the authentication callback for MCP server '${input.mcpServerId}'.`,
+            ),
+          ),
+        );
+        return preview
+          ? yield* previewSnapshot({
+              threadId: input.threadId,
+              projectId: input.projectId,
+              providerInstanceId: input.providerInstanceId,
+            })
+          : yield* snapshot({ threadId: input.threadId });
+      });
+
     return ThreadExtensions.of({
       snapshot,
       previewSnapshot,
@@ -626,6 +685,7 @@ export const makeThreadExtensions = Effect.fn("makeThreadExtensions")(
       previewEvents,
       reconnectMcp,
       beginMcpAuth,
+      relayMcpAuthCallback,
     });
   },
 );

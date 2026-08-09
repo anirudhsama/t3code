@@ -215,6 +215,18 @@ export const ThreadExtensionsMcpAuthInput = Schema.Struct({
 );
 export type ThreadExtensionsMcpAuthInput = typeof ThreadExtensionsMcpAuthInput.Type;
 
+export const ThreadExtensionsMcpAuthCallbackInput = Schema.Struct({
+  ...ThreadExtensionsMcpAuthInput.fields,
+  callbackUrl: TrimmedNonEmptyString,
+}).check(
+  Schema.makeFilter(
+    (input) =>
+      (input.projectId === undefined) === (input.providerInstanceId === undefined) ||
+      "projectId and providerInstanceId must be provided together",
+  ),
+);
+export type ThreadExtensionsMcpAuthCallbackInput = typeof ThreadExtensionsMcpAuthCallbackInput.Type;
+
 export const ThreadExtensionsMcpAuthResult = Schema.Struct({
   snapshot: ThreadExtensionsSnapshot,
   authorizationUrl: Schema.optional(TrimmedNonEmptyString),
@@ -238,6 +250,7 @@ export class ThreadExtensionsRpcError extends Schema.TaggedErrorClass<ThreadExte
       "provider-unavailable",
       "unsupported",
       "invalid-state",
+      "invalid-callback",
       "provider-failed",
     ]),
     message: TrimmedNonEmptyString,
@@ -255,6 +268,7 @@ export const EXTENSIONS_WS_METHODS = {
   subscribePreview: "extensions.subscribePreview",
   reconnectMcp: "extensions.reconnectMcp",
   beginMcpAuth: "extensions.beginMcpAuth",
+  relayMcpAuthCallback: "extensions.relayMcpAuthCallback",
 } as const;
 
 export const ThreadExtensionsRpcSchemas = {
@@ -289,5 +303,9 @@ export const ThreadExtensionsRpcSchemas = {
   beginMcpAuth: {
     input: ThreadExtensionsMcpAuthInput,
     output: ThreadExtensionsMcpAuthResult,
+  },
+  relayMcpAuthCallback: {
+    input: ThreadExtensionsMcpAuthCallbackInput,
+    output: ThreadExtensionsSnapshot,
   },
 } as const;

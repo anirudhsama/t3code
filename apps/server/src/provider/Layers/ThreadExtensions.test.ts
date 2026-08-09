@@ -18,6 +18,7 @@ import * as Stream from "effect/Stream";
 import * as OrchestrationEngine from "../../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
+import { ProviderMcpAuthError } from "../Errors.ts";
 import * as ProviderInstanceRegistry from "../Services/ProviderInstanceRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import { makeThreadExtensions } from "./ThreadExtensions.ts";
@@ -310,10 +311,11 @@ describe("ThreadExtensions", () => {
     }),
   );
 
-  it.effect("begins MCP authentication through a prepared draft runtime", () =>
+  it.effect("begins and relays MCP authentication through a prepared draft runtime", () =>
     Effect.gen(function* () {
       const pendingId = ThreadId.make("pending-auth-thread");
       let authenticatedThreadId: ThreadId | null = null;
+      let relayedCallback: string | null = null;
       const base = makeInstance();
       const instance = {
         ...base,
@@ -324,6 +326,10 @@ describe("ThreadExtensions", () => {
             authenticate: (input) => {
               authenticatedThreadId = input.threadId;
               return Effect.succeed({ authorizationUrl: "https://example.test/authorize" });
+            },
+            relayAuthenticationCallback: (input) => {
+              relayedCallback = input.callbackUrl;
+              return Effect.void;
             },
           },
         },
@@ -339,6 +345,55 @@ describe("ThreadExtensions", () => {
       expect(authenticatedThreadId).toBe(pendingId);
       expect(result.authorizationUrl).toBe("https://example.test/authorize");
       expect(result.snapshot.threadId).toBe(pendingId);
+
+      const relayed = yield* service.relayMcpAuthCallback!({
+        threadId: pendingId,
+        projectId: PROJECT_ID,
+        providerInstanceId: INSTANCE_ID,
+        mcpServerId: ProviderExtensionItemId.make("github"),
+        callbackUrl: "http://127.0.0.1:43123/callback/state?code=opaque",
+      });
+      expect(relayedCallback).toBe("http://127.0.0.1:43123/callback/state?code=opaque");
+      expect(relayed.threadId).toBe(pendingId);
+    }),
+  );
+
+  it.effect("maps callback mismatches to a typed error without exposing the URL", () =>
+    Effect.gen(function* () {
+      const secret = "oauth-code-secret";
+      const base = makeInstance();
+      const instance = {
+        ...base,
+        extensions: {
+          ...base.extensions!,
+          mcp: {
+            ...base.extensions!.mcp!,
+            relayAuthenticationCallback: () =>
+              Effect.fail(
+                new ProviderMcpAuthError({
+                  reason: "invalid-callback",
+                  detail: "The redirect URL does not match the pending authentication callback.",
+                  retryable: true,
+                }),
+              ),
+          },
+        },
+      } as ProviderInstance;
+      const service = yield* makeService({
+        threads: new Map([[THREAD_ID, thread()]]),
+        active: false,
+        instance,
+      });
+      const error = yield* service.relayMcpAuthCallback!({
+        threadId: THREAD_ID,
+        mcpServerId: ProviderExtensionItemId.make("github"),
+        callbackUrl: `http://127.0.0.1:43123/callback/state?code=${secret}`,
+      }).pipe(Effect.flip);
+
+      expect(error.reason).toBe("invalid-callback");
+      expect(error.retryable).toBe(true);
+      expect(error.message).not.toContain(secret);
+      expect(error.cause).toBeUndefined();
     }),
   );
 

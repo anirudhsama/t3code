@@ -18,10 +18,15 @@ import {
   buildTurnStartParams,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
+  MCP_OAUTH_TIMEOUT_SECS,
   openCodexThread,
   requestAllCodexMcpServerStatus,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+it("allows ten minutes for a manual MCP OAuth round trip", () => {
+  NodeAssert.equal(MCP_OAUTH_TIMEOUT_SECS, 600);
+});
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
   it("retains identifier purpose and the random source failure", () => {
