@@ -14,6 +14,7 @@ import {
   ApprovalRequestId,
   EventId,
   ProviderDriverKind,
+  ProviderExtensionItemId,
   ProviderInstanceId,
   ProviderSessionStartInput,
   ThreadId,
@@ -36,6 +37,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
+  ProviderAdapterProcessError,
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
   ProviderUnsupportedError,
@@ -88,27 +90,28 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
-  const startSession = vi.fn((input: ProviderSessionStartInput) =>
-    Effect.sync(() => {
-      const now = "2026-01-01T00:00:00.000Z";
-      const session: ProviderSession = {
-        provider,
-        ...(input.providerInstanceId !== undefined
-          ? { providerInstanceId: input.providerInstanceId }
-          : {}),
-        status: "ready",
-        runtimeMode: input.runtimeMode,
-        threadId: input.threadId,
-        resumeCursor: input.resumeCursor ?? {
-          opaque: `resume-${String(input.threadId)}`,
-        },
-        cwd: input.cwd ?? process.cwd(),
-        createdAt: now,
-        updatedAt: now,
-      };
-      sessions.set(session.threadId, session);
-      return session;
-    }),
+  const startSession = vi.fn(
+    (input: ProviderSessionStartInput): Effect.Effect<ProviderSession, ProviderAdapterError> =>
+      Effect.sync(() => {
+        const now = "2026-01-01T00:00:00.000Z";
+        const session: ProviderSession = {
+          provider,
+          ...(input.providerInstanceId !== undefined
+            ? { providerInstanceId: input.providerInstanceId }
+            : {}),
+          status: "ready",
+          runtimeMode: input.runtimeMode,
+          threadId: input.threadId,
+          resumeCursor: input.resumeCursor ?? {
+            opaque: `resume-${String(input.threadId)}`,
+          },
+          cwd: input.cwd ?? process.cwd(),
+          createdAt: now,
+          updatedAt: now,
+        };
+        sessions.set(session.threadId, session);
+        return session;
+      }),
   );
 
   const sendTurn = vi.fn(
@@ -198,6 +201,16 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
         sessions.clear();
       }),
   );
+  const reconcileOverrides = vi.fn<
+    NonNullable<
+      NonNullable<ProviderAdapterShape<ProviderAdapterError>["extensions"]>["reconcileOverrides"]
+    >
+  >((input) =>
+    Effect.succeed({
+      state: { appliedOverrideRevision: input.extensionOverridesRevision },
+    }),
+  );
+  const reconciliationState = vi.fn(() => Effect.succeed({ appliedOverrideRevision: 0 }));
 
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
@@ -215,6 +228,21 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     readThread,
     rollbackThread,
     stopAll,
+    extensions: {
+      capabilities: {
+        skills: { inventory: true, refresh: true, threadOverride: true },
+        mcp: {
+          inventory: true,
+          liveStatus: true,
+          threadOverride: true,
+          reconnect: false,
+          authenticate: false,
+        },
+      },
+      reconcileOverrides,
+      reconciliationState,
+      events: Stream.empty,
+    },
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
@@ -250,6 +278,8 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     readThread,
     rollbackThread,
     stopAll,
+    reconcileOverrides,
+    reconciliationState,
   };
 }
 
@@ -841,6 +871,36 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("routes extension reconciliation through the bound provider instance", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const result = yield* provider.reconcileExtensions!({
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-extensions"),
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+        skillOverrides: {},
+        mcpOverrides: { [ProviderExtensionItemId.make("postgres")]: "disabled" },
+        extensionOverridesRevision: 4,
+      });
+      const state = yield* provider.getExtensionReconciliationState!({
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-extensions"),
+      });
+
+      assert.equal(result.state.appliedOverrideRevision, 4);
+      assert.equal(state.appliedOverrideRevision, 0);
+      assert.deepEqual(routing.codex.reconcileOverrides.mock.calls[0]?.[0], {
+        threadId: asThreadId("thread-extensions"),
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+        skillOverrides: {},
+        mcpOverrides: { [ProviderExtensionItemId.make("postgres")]: "disabled" },
+        extensionOverridesRevision: 4,
+      });
+    }),
+  );
+
   it.effect("routes provider operations and rollback conversation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
@@ -924,6 +984,98 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(startPayload.threadId, session.threadId);
       }
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("starts fresh when Codex recovery finds no zero-turn rollout", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-zero-turn-rollout");
+      const initial = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-worktree",
+        runtimeMode: "full-access",
+      });
+      const persisted = yield* runtimeRepository.getByThreadId({ threadId });
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isSome(persisted)) {
+        assert.deepInclude(persisted.value.runtimePayload as object, {
+          providerHistoryObserved: false,
+        });
+      }
+
+      yield* routing.codex.stopSession(threadId);
+      routing.codex.startSession.mockClear();
+      routing.codex.sendTurn.mockClear();
+      routing.codex.startSession.mockImplementationOnce((input) =>
+        Effect.fail(
+          new ProviderAdapterProcessError({
+            provider: CODEX_DRIVER,
+            threadId: input.threadId,
+            detail: `no rollout found for thread id ${(initial.resumeCursor as { threadId: string }).threadId}`,
+          }),
+        ),
+      );
+
+      yield* provider.sendTurn({ threadId, input: "first turn", attachments: [] });
+
+      assert.equal(routing.codex.startSession.mock.calls.length, 2);
+      assert.deepEqual(
+        routing.codex.startSession.mock.calls[0]?.[0].resumeCursor,
+        initial.resumeCursor,
+      );
+      assert.equal(routing.codex.startSession.mock.calls[1]?.[0].resumeCursor, undefined);
+      assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("surfaces a missing Codex rollout when provider history exists", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-with-provider-history");
+      const initial = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      yield* provider.sendTurn({ threadId, input: "completed provider turn", attachments: [] });
+      const persisted = yield* runtimeRepository.getByThreadId({ threadId });
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isSome(persisted)) {
+        assert.deepInclude(persisted.value.runtimePayload as object, {
+          providerHistoryObserved: true,
+        });
+      }
+
+      yield* routing.codex.stopSession(threadId);
+      routing.codex.startSession.mockClear();
+      routing.codex.sendTurn.mockClear();
+      routing.codex.startSession.mockImplementationOnce((input) =>
+        Effect.fail(
+          new ProviderAdapterProcessError({
+            provider: CODEX_DRIVER,
+            threadId: input.threadId,
+            detail: `no rollout found for thread id ${(initial.resumeCursor as { threadId: string }).threadId}`,
+          }),
+        ),
+      );
+
+      const result = yield* provider
+        .sendTurn({ threadId, input: "must retain history", attachments: [] })
+        .pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.instanceOf(result.failure, ProviderAdapterProcessError);
+      }
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
     }),
   );
 
@@ -1272,12 +1424,14 @@ routing.layer("ProviderServiceLive routing", (it) => {
             activeTurnId: string | null;
             lastError: string | null;
             lastRuntimeEvent: string | null;
+            providerHistoryObserved: boolean;
           };
           assert.equal(runtimePayload.cwd, session.cwd);
           assert.equal(runtimePayload.model, null);
           assert.equal(runtimePayload.activeTurnId, `turn-${String(session.threadId)}`);
           assert.equal(runtimePayload.lastError, null);
           assert.equal(runtimePayload.lastRuntimeEvent, "provider.sendTurn");
+          assert.equal(runtimePayload.providerHistoryObserved, true);
         }
       }
     }),

@@ -45,7 +45,12 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
-import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
+import {
+  type ProviderAdapterError,
+  ProviderAdapterProcessError,
+  ProviderUnsupportedError,
+  ProviderValidationError,
+} from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
@@ -125,6 +130,7 @@ function toRuntimePayloadFromSession(
     readonly modelSelection?: unknown;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
+    readonly providerHistoryObserved?: boolean;
   },
 ): Record<string, unknown> {
   return {
@@ -136,6 +142,9 @@ function toRuntimePayloadFromSession(
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
       ? { lastRuntimeEventAt: extra.lastRuntimeEventAt }
+      : {}),
+    ...(extra?.providerHistoryObserved !== undefined
+      ? { providerHistoryObserved: extra.providerHistoryObserved }
       : {}),
   };
 }
@@ -160,6 +169,27 @@ function readPersistedCwd(
   if (typeof rawCwd !== "string") return undefined;
   const trimmed = rawCwd.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readPersistedProviderHistoryObserved(
+  runtimePayload: ProviderSessionDirectory.ProviderRuntimeBinding["runtimePayload"],
+): boolean | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return undefined;
+  }
+  const observed =
+    "providerHistoryObserved" in runtimePayload
+      ? runtimePayload.providerHistoryObserved
+      : undefined;
+  return typeof observed === "boolean" ? observed : undefined;
+}
+
+function isCodexNoRolloutFound(error: ProviderAdapterError): error is ProviderAdapterProcessError {
+  return (
+    error._tag === "ProviderAdapterProcessError" &&
+    error.provider === "codex" &&
+    /no rollout found for thread id/i.test(error.detail)
+  );
 }
 
 const dieOnMissingBindingInstanceId = (
@@ -263,6 +293,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       readonly modelSelection?: unknown;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
+      readonly providerHistoryObserved?: boolean;
     },
   ) =>
     Effect.gen(function* () {
@@ -397,18 +428,34 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
-      yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
-      const resumed = yield* adapter
-        .startSession({
-          threadId: input.binding.threadId,
-          provider: input.binding.provider,
-          providerInstanceId: bindingInstanceId,
-          ...(persistedCwd ? { cwd: persistedCwd } : {}),
-          ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
-          ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
-          runtimeMode: input.binding.runtimeMode ?? "full-access",
-        })
-        .pipe(Effect.onError(() => clearMcpSession(input.binding.threadId)));
+      const startRecoveredSession = (resumeCursor?: unknown) =>
+        prepareMcpSession(input.binding.threadId, bindingInstanceId).pipe(
+          Effect.andThen(
+            adapter.startSession({
+              threadId: input.binding.threadId,
+              provider: input.binding.provider,
+              providerInstanceId: bindingInstanceId,
+              ...(persistedCwd ? { cwd: persistedCwd } : {}),
+              ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
+              ...(resumeCursor !== undefined ? { resumeCursor } : {}),
+              runtimeMode: input.binding.runtimeMode ?? "full-access",
+            }),
+          ),
+          Effect.onError(() => clearMcpSession(input.binding.threadId)),
+        );
+      let recoveryStrategy = "resume-thread";
+      const resumed = yield* startRecoveredSession(input.binding.resumeCursor).pipe(
+        Effect.catch((error) => {
+          if (
+            !isCodexNoRolloutFound(error) ||
+            readPersistedProviderHistoryObserved(input.binding.runtimePayload) !== false
+          ) {
+            return Effect.fail(error);
+          }
+          recoveryStrategy = "fresh-after-missing-rollout";
+          return startRecoveredSession();
+        }),
+      );
       if (resumed.provider !== adapter.provider) {
         yield* clearMcpSession(input.binding.threadId);
         return yield* toValidationError(
@@ -423,7 +470,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       );
       yield* analytics.record("provider.session.recovered", {
         provider: resumed.provider,
-        strategy: "resume-thread",
+        strategy: recoveryStrategy,
         hasResumeCursor: resumed.resumeCursor !== undefined,
       });
       return { adapter, session: resumed } as const;
@@ -621,6 +668,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
+          ...(!persistedBinding ? { providerHistoryObserved: false } : {}),
         });
         yield* analytics.record("provider.session.started", {
           provider: sessionWithInstance.provider,
@@ -713,6 +761,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           activeTurnId: turn.turnId,
           lastRuntimeEvent: "provider.sendTurn",
           lastRuntimeEventAt: yield* nowIso,
+          providerHistoryObserved: true,
         },
       });
       yield* analytics.record("provider.turn.sent", {
@@ -993,6 +1042,35 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getInstanceInfo: ProviderServiceMethod<"getInstanceInfo"> = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
+  const reconcileExtensions: NonNullable<ProviderServiceMethod<"reconcileExtensions">> = Effect.fn(
+    "ProviderService.reconcileExtensions",
+  )(function* (input) {
+    const { providerInstanceId, ...reconciliationInput } = input;
+    const adapter = yield* registry.getByInstance(providerInstanceId);
+    const reconcile = adapter.extensions?.reconcileOverrides;
+    if (!reconcile) {
+      return yield* new ProviderUnsupportedError({ provider: adapter.provider });
+    }
+    const result = yield* reconcile(reconciliationInput);
+    if (result.session) {
+      yield* upsertSessionBinding({ ...result.session, providerInstanceId }, input.threadId, {
+        modelSelection: input.modelSelection,
+      });
+    }
+    return result;
+  });
+
+  const getExtensionReconciliationState: NonNullable<
+    ProviderServiceMethod<"getExtensionReconciliationState">
+  > = Effect.fn("ProviderService.getExtensionReconciliationState")(function* (input) {
+    const adapter = yield* registry.getByInstance(input.providerInstanceId);
+    const readState = adapter.extensions?.reconciliationState;
+    if (!readState) {
+      return yield* new ProviderUnsupportedError({ provider: adapter.provider });
+    }
+    return yield* readState(input.threadId);
+  });
+
   const rollbackConversation: ProviderServiceMethod<"rollbackConversation"> = Effect.fn(
     "rollbackConversation",
   )(function* (rawInput) {
@@ -1104,6 +1182,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     listSessions,
     getCapabilities,
     getInstanceInfo,
+    reconcileExtensions,
+    getExtensionReconciliationState,
     rollbackConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each

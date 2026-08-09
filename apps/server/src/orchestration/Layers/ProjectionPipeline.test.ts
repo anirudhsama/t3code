@@ -8,6 +8,7 @@ import {
   ThreadId,
   TurnId,
   ProviderInstanceId,
+  ProviderExtensionItemId,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -35,6 +36,7 @@ import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
 
 const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
@@ -240,6 +242,144 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 });
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-extension-overrides-")))(
+  "OrchestrationProjectionPipeline extension overrides",
+  (it) => {
+    it.effect("replays isolated thread overrides and backward defaults", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-01-01T00:00:00.000Z";
+        const skillId = ProviderExtensionItemId.make("/repo/.codex/skills/review/SKILL.md");
+        const mcpServerId = ProviderExtensionItemId.make("postgres");
+
+        for (const [index, threadId] of ["thread-a", "thread-b"].entries()) {
+          yield* eventStore.append({
+            type: "thread.created",
+            eventId: EventId.make(`evt-extension-create-${index}`),
+            aggregateKind: "thread",
+            aggregateId: ThreadId.make(threadId),
+            occurredAt: now,
+            commandId: CommandId.make(`cmd-extension-create-${index}`),
+            causationEventId: null,
+            correlationId: CommandId.make(`cmd-extension-create-${index}`),
+            metadata: {},
+            payload: {
+              threadId: ThreadId.make(threadId),
+              projectId: ProjectId.make("project-1"),
+              title: threadId,
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("codex"),
+                model: "gpt-5-codex",
+              },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+        }
+
+        yield* eventStore.append({
+          type: "thread.skill-override-set",
+          eventId: EventId.make("evt-extension-skill-a"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-a"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-extension-skill-a"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-extension-skill-a"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-a"),
+            skillId,
+            state: "disabled",
+            extensionOverridesRevision: 1,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.skill-override-set",
+          eventId: EventId.make("evt-extension-skill-b"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-b"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-extension-skill-b"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-extension-skill-b"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-b"),
+            skillId,
+            state: "enabled",
+            extensionOverridesRevision: 1,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.mcp-override-set",
+          eventId: EventId.make("evt-extension-mcp-a"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-a"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-extension-mcp-a"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-extension-mcp-a"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-a"),
+            mcpServerId,
+            state: "enabled",
+            extensionOverridesRevision: 2,
+            updatedAt: now,
+          },
+        });
+
+        const readRows = () =>
+          sql<{
+            readonly threadId: string;
+            readonly skillOverridesJson: string;
+            readonly mcpOverridesJson: string;
+            readonly revision: number;
+          }>`
+            SELECT
+              thread_id AS "threadId",
+              skill_overrides_json AS "skillOverridesJson",
+              mcp_overrides_json AS "mcpOverridesJson",
+              extension_overrides_revision AS revision
+            FROM projection_threads
+            ORDER BY thread_id ASC
+          `;
+
+        const expected = [
+          {
+            threadId: "thread-a",
+            skillOverridesJson: '{"/repo/.codex/skills/review/SKILL.md":"disabled"}',
+            mcpOverridesJson: '{"postgres":"enabled"}',
+            revision: 2,
+          },
+          {
+            threadId: "thread-b",
+            skillOverridesJson: '{"/repo/.codex/skills/review/SKILL.md":"enabled"}',
+            mcpOverridesJson: "{}",
+            revision: 1,
+          },
+        ];
+
+        yield* projectionPipeline.bootstrap;
+        assert.deepEqual(yield* readRows(), expected);
+
+        yield* sql`DELETE FROM projection_threads`;
+        yield* sql`DELETE FROM projection_state`;
+        yield* projectionPipeline.bootstrap;
+        assert.deepEqual(yield* readRows(), expected);
+      }),
+    );
+  },
+);
 
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-base-")))(
   "OrchestrationProjectionPipeline",
@@ -2672,7 +2812,7 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
 
 const engineLayer = it.layer(
   OrchestrationEngineLive.pipe(
-    Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+    Layer.provideMerge(OrchestrationProjectionSnapshotQueryLive),
     Layer.provide(ThreadBackgroundLiveness.layer),
     Layer.provide(ThreadPlanProgress.layer),
     Layer.provide(OrchestrationProjectionPipelineLive),
@@ -2783,6 +2923,66 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
           defaultModelSelection: '{"instanceId":"codex","model":"gpt-5"}',
         },
       ]);
+    }),
+  );
+
+  it.effect("projects per-thread extension overrides into thread snapshots", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const projectId = ProjectId.make("project-extension-snapshots");
+      const skillId = ProviderExtensionItemId.make("/repo/skill/SKILL.md");
+
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-extension-project-create"),
+        projectId,
+        title: "Extension snapshots",
+        workspaceRoot: "/tmp/project-extension-snapshots",
+        createdAt,
+      });
+
+      for (const [index, threadId] of ["thread-extension-a", "thread-extension-b"].entries()) {
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`cmd-extension-thread-create-${index}`),
+          threadId: ThreadId.make(threadId),
+          projectId,
+          title: threadId,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.skill-override.set",
+          commandId: CommandId.make(`cmd-extension-skill-${index}`),
+          threadId: ThreadId.make(threadId),
+          skillId,
+          state: index === 0 ? "disabled" : "enabled",
+          expectedRevision: 0,
+          createdAt,
+        });
+      }
+
+      const [threadA, threadB] = yield* Effect.all([
+        snapshotQuery.getThreadShellById(ThreadId.make("thread-extension-a")),
+        snapshotQuery.getThreadShellById(ThreadId.make("thread-extension-b")),
+      ]);
+      assert.isTrue(threadA._tag === "Some");
+      assert.isTrue(threadB._tag === "Some");
+      if (threadA._tag === "Some" && threadB._tag === "Some") {
+        assert.deepEqual(threadA.value.skillOverrides, { [skillId]: "disabled" });
+        assert.deepEqual(threadB.value.skillOverrides, { [skillId]: "enabled" });
+        assert.equal(threadA.value.extensionOverridesRevision, 1);
+        assert.equal(threadB.value.extensionOverridesRevision, 1);
+      }
     }),
   );
 });

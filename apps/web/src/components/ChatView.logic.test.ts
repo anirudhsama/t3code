@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   MessageId,
   ProjectId,
+  ProviderExtensionItemId,
   ProviderInstanceId,
   ThreadId,
   TurnId,
@@ -9,11 +10,14 @@ import {
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { Thread, ThreadShell } from "../types";
+import type { DraftThreadState } from "../composerDraftStore";
 import {
   MAX_HIDDEN_MOUNTED_PREVIEW_THREADS,
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
+  buildInitialMcpOverrides,
+  buildLocalDraftThread,
   buildLoadingThreadFromShell,
   buildThreadTurnInterruptInput,
   createLocalDispatchSnapshot,
@@ -38,6 +42,52 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+describe("draft MCP overrides", () => {
+  const docsServerId = ProviderExtensionItemId.make("docs");
+  const modelSelection = {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: "gpt-5.4",
+  };
+
+  function makeDraftThread(mcpOverrides: DraftThreadState["mcpOverrides"]): DraftThreadState {
+    return {
+      threadId,
+      environmentId,
+      projectId,
+      logicalProjectKey: "project-1",
+      createdAt: now,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      envMode: "local",
+      startFromOrigin: false,
+      mcpOverrides,
+    };
+  }
+
+  it("carries stored overrides through the local thread and thread creation input", () => {
+    const mcpOverrides = { [docsServerId]: "disabled" } as const;
+    const localDraftThread = buildLocalDraftThread(
+      threadId,
+      makeDraftThread(mcpOverrides),
+      modelSelection,
+    );
+
+    expect(localDraftThread.mcpOverrides).toEqual(mcpOverrides);
+    expect(buildInitialMcpOverrides(localDraftThread.mcpOverrides)).toEqual({
+      initialMcpOverrides: mcpOverrides,
+    });
+  });
+
+  it("omits initial overrides when the stored map is empty", () => {
+    const localDraftThread = buildLocalDraftThread(threadId, makeDraftThread({}), modelSelection);
+
+    expect(localDraftThread.mcpOverrides).toEqual({});
+    expect(buildInitialMcpOverrides(localDraftThread.mcpOverrides)).toEqual({});
+  });
+});
 
 describe("environment reconnect warning grace", () => {
   afterEach(() => vi.useRealTimers());
@@ -101,6 +151,9 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     latestTurn: null,
     branch: null,
     worktreePath: null,
+    skillOverrides: {},
+    mcpOverrides: {},
+    extensionOverridesRevision: 0,
     ...overrides,
   };
 }
@@ -153,6 +206,9 @@ describe("buildLoadingThreadFromShell", () => {
       hasPendingApprovals: false,
       hasPendingUserInput: false,
       hasActionableProposedPlan: false,
+      skillOverrides: {},
+      mcpOverrides: {},
+      extensionOverridesRevision: 0,
     } satisfies ThreadShell;
 
     expect(buildLoadingThreadFromShell(shell)).toMatchObject({

@@ -18,6 +18,21 @@ beforeEach(() => {
 });
 
 describe("rightPanelStore", () => {
+  it("persists the Skills collapse state with the extensions surface", () => {
+    useRightPanelStore.getState().open(refA, "extensions");
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)
+        .extensionsSkillsCollapsed ?? true,
+    ).toBe(true);
+
+    useRightPanelStore.getState().setExtensionsSkillsCollapsed(refA, false);
+
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)
+        .extensionsSkillsCollapsed,
+    ).toBe(false);
+  });
+
   it("drops the legacy singleton terminal surface during migration", () => {
     expect(
       migratePersistedRightPanelState({
@@ -134,6 +149,44 @@ describe("rightPanelStore", () => {
           surfaces: [{ id: "diff", kind: "diff" }],
         },
       },
+    });
+  });
+
+  it("preserves unrelated surfaces while adding the extensions singleton", () => {
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: "extensions",
+            surfaces: [
+              { id: "diff", kind: "diff" },
+              { id: "extensions", kind: "extensions" },
+              { id: "agents", kind: "agents" },
+            ],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: true,
+          activeSurfaceId: "extensions",
+          surfaces: [
+            { id: "diff", kind: "diff" },
+            { id: "extensions", kind: "extensions" },
+            { id: "agents", kind: "agents" },
+          ],
+        },
+      },
+    });
+
+    useRightPanelStore.getState().open(refA, "extensions");
+    useRightPanelStore.getState().open(refA, "extensions");
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "extensions",
+      surfaces: [{ id: "extensions", kind: "extensions" }],
     });
   });
 

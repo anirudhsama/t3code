@@ -105,7 +105,18 @@ export function buildLocalDraftThread(
     checkpoints: [],
     activities: [],
     proposedPlans: [],
+    skillOverrides: {},
+    mcpOverrides: draftThread.mcpOverrides,
+    extensionOverridesRevision: 0,
   };
+}
+
+export function buildInitialMcpOverrides(mcpOverrides: Thread["mcpOverrides"] | undefined): {
+  initialMcpOverrides?: Thread["mcpOverrides"];
+} {
+  return mcpOverrides && Object.keys(mcpOverrides).length > 0
+    ? { initialMcpOverrides: mcpOverrides }
+    : {};
 }
 
 export function buildLoadingThreadFromShell(shell: ThreadShell): Thread {

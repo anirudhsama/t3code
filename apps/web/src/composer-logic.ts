@@ -1,3 +1,5 @@
+import type { ProviderSelectedSkill, ProviderSkill } from "@t3tools/contracts";
+
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
 
@@ -9,6 +11,69 @@ export interface ComposerTrigger {
   query: string;
   rangeStart: number;
   rangeEnd: number;
+}
+
+function skillDisplayName(skill: Pick<ProviderSkill, "displayName" | "name">): string {
+  return skill.displayName?.trim() || skill.name;
+}
+
+export function contextualSkillSourceLabel(skill: ProviderSkill): string {
+  const scope = skill.scope === "user" ? "global" : skill.scope;
+  return skill.path ? `${scope} · ${skill.path}` : scope;
+}
+
+export function contextualSkillLabel(
+  skill: ProviderSkill,
+  skills: readonly ProviderSkill[],
+): string {
+  const duplicateName = skills.some(
+    (candidate) => candidate.id !== skill.id && candidate.name === skill.name,
+  );
+  return duplicateName
+    ? `${skillDisplayName(skill)} — ${contextualSkillSourceLabel(skill)}`
+    : skillDisplayName(skill);
+}
+
+export function searchContextualSkills(
+  skills: readonly ProviderSkill[],
+  query: string,
+): ProviderSkill[] {
+  const normalized = query.trim().toLowerCase();
+  const enabled = skills.filter((skill) => skill.effectiveEnabled);
+  if (!normalized) return [...enabled];
+  return enabled
+    .map((skill, index) => {
+      const name = skill.name.toLowerCase();
+      const label = skillDisplayName(skill).toLowerCase();
+      const source = contextualSkillSourceLabel(skill).toLowerCase();
+      const description = skill.description?.toLowerCase() ?? "";
+      const score =
+        name === normalized || label === normalized
+          ? 0
+          : name.startsWith(normalized) || label.startsWith(normalized)
+            ? 1
+            : name.includes(normalized) || label.includes(normalized)
+              ? 2
+              : source.includes(normalized)
+                ? 3
+                : description.includes(normalized)
+                  ? 4
+                  : null;
+      return score === null ? null : { skill, score, index };
+    })
+    .filter(
+      (value): value is { skill: ProviderSkill; score: number; index: number } => value !== null,
+    )
+    .sort((left, right) => left.score - right.score || left.index - right.index)
+    .map(({ skill }) => skill);
+}
+
+export function selectedSkillRef(skill: ProviderSkill): ProviderSelectedSkill {
+  return {
+    id: skill.id,
+    name: skill.name,
+    ...(skill.path ? { path: skill.path } : {}),
+  };
 }
 
 export function shouldSubmitComposerOnEnter(input: {

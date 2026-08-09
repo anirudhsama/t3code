@@ -68,6 +68,11 @@ import {
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
+  EXTENSIONS_WS_METHODS,
+  ThreadExtensionsRpcError,
+  ThreadExtensionsRpcSchemas,
+} from "./providerExtensions.ts";
+import {
   RelayClientInstallFailedError,
   RelayClientInstallProgressEventSchema,
   RelayClientStatusSchema,
@@ -761,6 +766,68 @@ export const WsOrchestrationSubscribeThreadRpc = Rpc.make(
   },
 );
 
+export const WsExtensionsGetThreadSnapshotRpc = Rpc.make(EXTENSIONS_WS_METHODS.getThreadSnapshot, {
+  payload: ThreadExtensionsRpcSchemas.getThreadSnapshot.input,
+  success: ThreadExtensionsRpcSchemas.getThreadSnapshot.output,
+  error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsExtensionsGetPreviewSnapshotRpc = Rpc.make(
+  EXTENSIONS_WS_METHODS.getPreviewSnapshot,
+  {
+    payload: ThreadExtensionsRpcSchemas.getPreviewSnapshot.input,
+    success: ThreadExtensionsRpcSchemas.getPreviewSnapshot.output,
+    error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsExtensionsRefreshThreadRpc = Rpc.make(EXTENSIONS_WS_METHODS.refreshThread, {
+  payload: ThreadExtensionsRpcSchemas.refreshThread.input,
+  success: ThreadExtensionsRpcSchemas.refreshThread.output,
+  error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsExtensionsRefreshPreviewRpc = Rpc.make(EXTENSIONS_WS_METHODS.refreshPreview, {
+  payload: ThreadExtensionsRpcSchemas.refreshPreview.input,
+  success: ThreadExtensionsRpcSchemas.refreshPreview.output,
+  error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsExtensionsSubscribeThreadRpc = Rpc.make(EXTENSIONS_WS_METHODS.subscribeThread, {
+  payload: ThreadExtensionsRpcSchemas.subscribeThread.input,
+  success: ThreadExtensionsRpcSchemas.subscribeThread.output,
+  error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+export const WsExtensionsSubscribePreviewRpc = Rpc.make(EXTENSIONS_WS_METHODS.subscribePreview, {
+  payload: ThreadExtensionsRpcSchemas.subscribePreview.input,
+  success: ThreadExtensionsRpcSchemas.subscribePreview.output,
+  error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+export const WsExtensionsReconnectMcpRpc = Rpc.make(EXTENSIONS_WS_METHODS.reconnectMcp, {
+  payload: ThreadExtensionsRpcSchemas.reconnectMcp.input,
+  success: ThreadExtensionsRpcSchemas.reconnectMcp.output,
+  error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsExtensionsBeginMcpAuthRpc = Rpc.make(EXTENSIONS_WS_METHODS.beginMcpAuth, {
+  payload: ThreadExtensionsRpcSchemas.beginMcpAuth.input,
+  success: ThreadExtensionsRpcSchemas.beginMcpAuth.output,
+  error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsExtensionsRelayMcpAuthCallbackRpc = Rpc.make(
+  EXTENSIONS_WS_METHODS.relayMcpAuthCallback,
+  {
+    payload: ThreadExtensionsRpcSchemas.relayMcpAuthCallback.input,
+    success: ThreadExtensionsRpcSchemas.relayMcpAuthCallback.output,
+    error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: Schema.Struct({}),
   success: TerminalEvent,
@@ -893,4 +960,13 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationGetArchivedShellSnapshotRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
+  WsExtensionsGetThreadSnapshotRpc,
+  WsExtensionsGetPreviewSnapshotRpc,
+  WsExtensionsRefreshThreadRpc,
+  WsExtensionsRefreshPreviewRpc,
+  WsExtensionsSubscribeThreadRpc,
+  WsExtensionsSubscribePreviewRpc,
+  WsExtensionsReconnectMcpRpc,
+  WsExtensionsBeginMcpAuthRpc,
+  WsExtensionsRelayMcpAuthCallbackRpc,
 );

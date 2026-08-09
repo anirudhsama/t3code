@@ -22,6 +22,13 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import {
+  ProviderExtensionItemId,
+  ProviderExtensionOverrideState,
+  ProviderMcpOverrides,
+  ProviderSelectedSkill,
+  ProviderSkillOverrides,
+} from "./providerExtensions.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -394,6 +401,9 @@ export const OrchestrationThread = Schema.Struct({
   activities: Schema.Array(OrchestrationThreadActivity),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
+  skillOverrides: ProviderSkillOverrides.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  mcpOverrides: ProviderMcpOverrides.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  extensionOverridesRevision: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
 });
 export type OrchestrationThread = typeof OrchestrationThread.Type;
 
@@ -466,6 +476,9 @@ export const OrchestrationThreadShell = Schema.Struct({
       }),
     ),
   ),
+  skillOverrides: ProviderSkillOverrides.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  mcpOverrides: ProviderMcpOverrides.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  extensionOverridesRevision: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 
@@ -765,6 +778,26 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+export const ThreadSkillOverrideSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.skill-override.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  skillId: ProviderExtensionItemId,
+  state: ProviderExtensionOverrideState,
+  expectedRevision: NonNegativeInt,
+  createdAt: IsoDateTime,
+});
+
+export const ThreadMcpOverrideSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.mcp-override.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  mcpServerId: ProviderExtensionItemId,
+  state: ProviderExtensionOverrideState,
+  expectedRevision: NonNegativeInt,
+  createdAt: IsoDateTime,
+});
+
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
@@ -774,6 +807,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
+  initialMcpOverrides: Schema.optional(ProviderMcpOverrides),
 });
 
 const ThreadTurnStartBootstrapPrepareWorktree = Schema.Struct({
@@ -809,6 +843,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  selectedSkills: Schema.optional(Schema.Array(ProviderSelectedSkill)),
   createdAt: IsoDateTime,
 });
 
@@ -828,6 +863,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  selectedSkills: Schema.optional(Schema.Array(ProviderSelectedSkill)),
   createdAt: IsoDateTime,
 });
 
@@ -890,6 +926,8 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
+  ThreadSkillOverrideSetCommand,
+  ThreadMcpOverrideSetCommand,
   ThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
   ThreadApprovalRespondCommand,
@@ -918,6 +956,8 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
+  ThreadSkillOverrideSetCommand,
+  ThreadMcpOverrideSetCommand,
   ClientThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
   ThreadApprovalRespondCommand,
@@ -1036,6 +1076,8 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.meta-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
+  "thread.skill-override-set",
+  "thread.mcp-override-set",
   "thread.message-sent",
   "thread.turn-start-requested",
   "thread.turn-interrupt-requested",
@@ -1191,6 +1233,22 @@ export const ThreadInteractionModeSetPayload = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 
+export const ThreadSkillOverrideSetPayload = Schema.Struct({
+  threadId: ThreadId,
+  skillId: ProviderExtensionItemId,
+  state: ProviderExtensionOverrideState,
+  extensionOverridesRevision: NonNegativeInt,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadMcpOverrideSetPayload = Schema.Struct({
+  threadId: ThreadId,
+  mcpServerId: ProviderExtensionItemId,
+  state: ProviderExtensionOverrideState,
+  extensionOverridesRevision: NonNegativeInt,
+  updatedAt: IsoDateTime,
+});
+
 export const ThreadMessageSentPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
@@ -1213,6 +1271,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  selectedSkills: Schema.optional(Schema.Array(ProviderSelectedSkill)),
   createdAt: IsoDateTime,
 });
 
@@ -1384,6 +1443,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.interaction-mode-set"),
     payload: ThreadInteractionModeSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.skill-override-set"),
+    payload: ThreadSkillOverrideSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.mcp-override-set"),
+    payload: ThreadMcpOverrideSetPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

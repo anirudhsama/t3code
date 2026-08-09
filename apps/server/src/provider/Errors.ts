@@ -68,6 +68,43 @@ export class ProviderAdapterRequestError extends Schema.TaggedErrorClass<Provide
   }
 }
 
+/** Safe, provider-owned MCP OAuth lifecycle and callback-relay failure. */
+export class ProviderMcpAuthError extends Schema.TaggedErrorClass<ProviderMcpAuthError>()(
+  "ProviderMcpAuthError",
+  {
+    reason: Schema.Literals([
+      "duplicate-pending",
+      "no-pending",
+      "already-completed",
+      "invalid-callback",
+      "unsafe-redirect",
+      "relay-failed",
+    ]),
+    detail: Schema.String,
+    retryable: Schema.Boolean,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/** Selected skill identity no longer resolves to an effectively enabled provider skill. */
+export class ProviderAdapterStaleSkillSelectionError extends Schema.TaggedErrorClass<ProviderAdapterStaleSkillSelectionError>()(
+  "ProviderAdapterStaleSkillSelectionError",
+  {
+    provider: Schema.String,
+    threadId: Schema.String,
+    skillId: Schema.String,
+    skillName: Schema.String,
+    reason: Schema.Literals(["missing", "disabled", "identity-mismatch"]),
+  },
+) {
+  override get message(): string {
+    return `Selected skill '${this.skillName}' (${this.skillId}) is stale for ${this.provider} thread '${this.threadId}': ${this.reason}.`;
+  }
+}
+
 /**
  * ProviderAdapterProcessError - Provider process lifecycle failure.
  */
@@ -192,6 +229,8 @@ export type ProviderAdapterError =
   | ProviderAdapterSessionNotFoundError
   | ProviderAdapterSessionClosedError
   | ProviderAdapterRequestError
+  | ProviderMcpAuthError
+  | ProviderAdapterStaleSkillSelectionError
   | ProviderAdapterProcessError;
 
 export type ProviderServiceError =

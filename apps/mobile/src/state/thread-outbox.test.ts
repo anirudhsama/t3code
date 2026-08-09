@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   MessageId,
   ProjectId,
+  ProviderExtensionItemId,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -92,6 +93,13 @@ describe("thread outbox", () => {
       },
       runtimeMode: "approval-required",
       interactionMode: "plan",
+      selectedSkills: [
+        {
+          id: ProviderExtensionItemId.make("/repo/.agents/skills/review/SKILL.md"),
+          name: "review",
+          path: "/repo/.agents/skills/review/SKILL.md",
+        },
+      ],
     } satisfies QueuedThreadMessage;
 
     expect(decodeQueuedThreadMessage(encodeQueuedThreadMessage(selectedMessage))).toEqual(

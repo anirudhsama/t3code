@@ -3,6 +3,7 @@ import {
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  EXTENSIONS_WS_METHODS,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -28,6 +29,24 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.subscribeBackgroundPolicy)).toBe(
       AuthOrchestrationReadScope,
     );
+  });
+
+  it("authorizes extension reads and mutations like their thread counterparts", () => {
+    for (const method of [
+      EXTENSIONS_WS_METHODS.getThreadSnapshot,
+      EXTENSIONS_WS_METHODS.getPreviewSnapshot,
+      EXTENSIONS_WS_METHODS.subscribeThread,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    }
+    for (const method of [
+      EXTENSIONS_WS_METHODS.refreshThread,
+      EXTENSIONS_WS_METHODS.reconnectMcp,
+      EXTENSIONS_WS_METHODS.beginMcpAuth,
+      EXTENSIONS_WS_METHODS.relayMcpAuthCallback,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+    }
   });
 
   it("allows relay status reads without granting relay installation access", () => {

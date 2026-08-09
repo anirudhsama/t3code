@@ -25,6 +25,7 @@ import {
   ThreadTurnStartRequestedPayload,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderExtensionItemId } from "./providerExtensions.ts";
 
 const decodeTurnDiffInput = Schema.decodeUnknownEffect(OrchestrationGetTurnDiffInput);
 const decodeFullThreadDiffInput = Schema.decodeUnknownEffect(OrchestrationGetFullThreadDiffInput);
@@ -52,6 +53,8 @@ function getOptionValue(
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
+const encodeOrchestrationCommand = Schema.encodeEffect(OrchestrationCommand);
+const encodeOrchestrationEvent = Schema.encodeEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
@@ -276,6 +279,10 @@ it.effect("accepts bootstrap metadata in thread.turn.start", () =>
           branch: null,
           worktreePath: null,
           createdAt: "2026-01-01T00:00:00.000Z",
+          initialMcpOverrides: {
+            [ProviderExtensionItemId.make("github")]: "disabled",
+            [ProviderExtensionItemId.make("docs")]: "enabled",
+          },
         },
         prepareWorktree: {
           projectCwd: "/tmp/workspace",
@@ -288,6 +295,10 @@ it.effect("accepts bootstrap metadata in thread.turn.start", () =>
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.bootstrap?.createThread?.projectId, "project-1");
+    assert.deepStrictEqual(parsed.bootstrap?.createThread?.initialMcpOverrides, {
+      [ProviderExtensionItemId.make("github")]: "disabled",
+      [ProviderExtensionItemId.make("docs")]: "enabled",
+    });
     assert.strictEqual(parsed.bootstrap?.prepareWorktree?.baseBranch, "main");
     assert.strictEqual(parsed.bootstrap?.prepareWorktree?.startFromOrigin, true);
     assert.strictEqual(parsed.bootstrap?.runSetupScript, true);
@@ -420,8 +431,124 @@ it.effect("defaults settled fields when decoding historical thread data", () =>
 
     assert.strictEqual(thread.settledOverride, null);
     assert.strictEqual(thread.settledAt, null);
+    assert.deepStrictEqual(thread.skillOverrides, {});
+    assert.deepStrictEqual(thread.mcpOverrides, {});
+    assert.strictEqual(thread.extensionOverridesRevision, 0);
     assert.strictEqual(shell.settledOverride, null);
     assert.strictEqual(shell.settledAt, null);
+    assert.deepStrictEqual(shell.skillOverrides, {});
+    assert.deepStrictEqual(shell.mcpOverrides, {});
+    assert.strictEqual(shell.extensionOverridesRevision, 0);
+  }),
+);
+
+it.effect("round-trips thread skill and MCP override commands", () =>
+  Effect.gen(function* () {
+    const commands = [
+      {
+        type: "thread.skill-override.set",
+        commandId: "cmd-skill-1",
+        threadId: "thread-1",
+        skillId: "/tmp/skills/review/SKILL.md",
+        state: "disabled",
+        expectedRevision: 2,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        type: "thread.mcp-override.set",
+        commandId: "cmd-mcp-1",
+        threadId: "thread-1",
+        mcpServerId: "github",
+        state: "inherit",
+        expectedRevision: 3,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      },
+    ] as const;
+
+    for (const command of commands) {
+      const decoded = yield* decodeOrchestrationCommand(command);
+      const encoded = yield* encodeOrchestrationCommand(decoded);
+      assert.deepStrictEqual(encoded, command);
+    }
+  }),
+);
+
+it.effect("round-trips thread skill and MCP override events", () =>
+  Effect.gen(function* () {
+    const events = [
+      {
+        sequence: 10,
+        eventId: "event-skill-1",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        type: "thread.skill-override-set",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+        commandId: "cmd-skill-1",
+        causationEventId: null,
+        correlationId: "cmd-skill-1",
+        metadata: {},
+        payload: {
+          threadId: "thread-1",
+          skillId: "/tmp/skills/review/SKILL.md",
+          state: "disabled",
+          extensionOverridesRevision: 3,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      {
+        sequence: 11,
+        eventId: "event-mcp-1",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        type: "thread.mcp-override-set",
+        occurredAt: "2026-01-01T00:00:01.000Z",
+        commandId: "cmd-mcp-1",
+        causationEventId: null,
+        correlationId: "cmd-mcp-1",
+        metadata: {},
+        payload: {
+          threadId: "thread-1",
+          mcpServerId: "github",
+          state: "enabled",
+          extensionOverridesRevision: 4,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+      },
+    ] as const;
+
+    for (const event of events) {
+      const decoded = yield* decodeOrchestrationEvent(event);
+      const encoded = yield* encodeOrchestrationEvent(decoded);
+      assert.deepStrictEqual(encoded, event);
+    }
+  }),
+);
+
+it.effect("preserves provider-opaque skill identity in thread.turn.start", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeThreadTurnStartCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-skill",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-skill",
+        role: "user",
+        text: "$review inspect this",
+        attachments: [],
+      },
+      selectedSkills: [
+        {
+          id: "/tmp/skills/review/SKILL.md",
+          name: "review",
+          path: "/tmp/skills/review/SKILL.md",
+        },
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.selectedSkills?.[0]?.id, "/tmp/skills/review/SKILL.md");
+    assert.strictEqual(parsed.selectedSkills?.[0]?.name, "review");
+    assert.strictEqual(parsed.selectedSkills?.[0]?.path, "/tmp/skills/review/SKILL.md");
   }),
 );
 

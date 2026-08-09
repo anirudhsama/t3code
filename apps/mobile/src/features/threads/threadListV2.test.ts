@@ -49,6 +49,9 @@ function makeThread(
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
     ...input,
+    skillOverrides: input.skillOverrides ?? {},
+    mcpOverrides: input.mcpOverrides ?? {},
+    extensionOverridesRevision: input.extensionOverridesRevision ?? 0,
   };
 }
 

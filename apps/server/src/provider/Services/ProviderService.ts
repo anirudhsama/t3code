@@ -31,6 +31,11 @@ import type * as Stream from "effect/Stream";
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
+import type {
+  ProviderExtensionReconciliationInput,
+  ProviderExtensionReconciliationResult,
+  ProviderExtensionReconciliationState,
+} from "./ThreadExtensions.ts";
 
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
@@ -96,6 +101,17 @@ export interface ProviderServiceShape {
   readonly getInstanceInfo: (
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderServiceError>;
+
+  readonly reconcileExtensions?: (
+    input: ProviderExtensionReconciliationInput & {
+      readonly providerInstanceId: ProviderInstanceId;
+    },
+  ) => Effect.Effect<ProviderExtensionReconciliationResult, ProviderServiceError>;
+
+  readonly getExtensionReconciliationState?: (input: {
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+  }) => Effect.Effect<ProviderExtensionReconciliationState, ProviderServiceError>;
 
   /**
    * Roll back provider conversation state by a number of turns.

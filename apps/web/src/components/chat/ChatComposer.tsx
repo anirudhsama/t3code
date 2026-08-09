@@ -5,12 +5,15 @@ import type {
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
   ProviderInteractionMode,
+  ProviderSelectedSkill,
   ResolvedKeybindingsConfig,
   RuntimeMode,
   ScopedThreadRef,
   ServerProvider,
   ThreadId,
+  ThreadExtensionsSnapshot,
 } from "@t3tools/contracts";
+import { selectEffectiveThreadSkills } from "@t3tools/client-runtime/state/extensions";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
@@ -39,6 +42,8 @@ import {
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   replaceTextRange,
+  contextualSkillLabel,
+  searchContextualSkills,
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
 import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
@@ -222,10 +227,10 @@ import {
   deriveLatestContextWindowSnapshot,
   formatProviderDisplayName,
 } from "../../lib/contextWindow";
-import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
-import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
+
+const EMPTY_CONTEXTUAL_SKILLS: ThreadExtensionsSnapshot["skills"] = [];
 
 const runtimeModeConfig: Record<
   RuntimeMode,
@@ -459,6 +464,8 @@ export interface ChatComposerHandle {
     cursor: number;
     expandedCursor: number;
     terminalContextIds: string[];
+    selectedSkills: ProviderSelectedSkill[];
+    invalidSkillNames: string[];
   };
   /** Reset composer cursor/trigger/highlight after external prompt mutations (e.g. onSend). */
   resetCursorState: (options?: {
@@ -483,6 +490,8 @@ export interface ChatComposerHandle {
     selectedProvider: ProviderDriverKind;
     selectedModel: string;
     selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
+    selectedSkills: ProviderSelectedSkill[];
+    invalidSkillNames: string[];
   };
 }
 
@@ -545,6 +554,8 @@ export interface ChatComposerProps {
   // Provider / model
   lockedProvider: ProviderDriverKind | null;
   providerStatuses: ServerProvider[];
+  extensionsSnapshot: ThreadExtensionsSnapshot | null;
+  extensionsLoading: boolean;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
 
@@ -635,6 +646,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     interactionMode,
     lockedProvider,
     providerStatuses,
+    extensionsSnapshot,
+    extensionsLoading,
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
     activeThreadActivities,
@@ -848,6 +861,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
     [selectedProviderEntry],
+  );
+  const contextualExtensionsSnapshot =
+    extensionsSnapshot?.providerInstanceId === selectedInstanceId ? extensionsSnapshot : null;
+  const contextualSkills = contextualExtensionsSnapshot?.skills ?? EMPTY_CONTEXTUAL_SKILLS;
+  const effectiveContextualSkills = useMemo(
+    () => selectEffectiveThreadSkills(contextualExtensionsSnapshot),
+    [contextualExtensionsSnapshot],
   );
 
   const composerPromptInjectionState = useMemo(
@@ -1082,24 +1102,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return searchSlashCommandItems(slashCommandItems, query);
     }
     if (composerTrigger.kind === "skill") {
-      return searchProviderSkills(selectedProviderStatus?.skills ?? [], composerTrigger.query).map(
+      return searchContextualSkills(effectiveContextualSkills, composerTrigger.query).map(
         (skill) => ({
-          id: `skill:${selectedProvider}:${skill.name}`,
+          id: `skill:${selectedInstanceId}:${skill.id}`,
           type: "skill" as const,
           provider: selectedProvider,
           skill,
-          label: formatProviderSkillDisplayName(skill),
-          description:
-            skill.shortDescription ??
-            skill.description ??
-            (skill.scope ? `${skill.scope} skill` : "Run provider skill"),
+          label: contextualSkillLabel(skill, contextualSkills),
+          description: skill.description ?? `Run ${skill.scope} skill`,
         }),
       );
     }
     return [];
   }, [
     composerTrigger,
+    contextualSkills,
+    effectiveContextualSkills,
     planModeUiEnabled,
+    selectedInstanceId,
     selectedProvider,
     selectedProviderStatus,
     workspaceEntries.entries,
@@ -1167,15 +1187,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   const isComposerMenuLoading =
-    composerTriggerKind === "path" && pathTriggerQuery.length > 0 && workspaceEntries.isPending;
+    (composerTriggerKind === "path" && pathTriggerQuery.length > 0 && workspaceEntries.isPending) ||
+    (composerTriggerKind === "skill" && extensionsLoading && !contextualExtensionsSnapshot);
   const composerMenuEmptyState = useMemo(() => {
     if (composerTriggerKind === "skill") {
-      return "No skills found. Try / to browse provider commands.";
+      return contextualExtensionsSnapshot &&
+        !contextualExtensionsSnapshot.capabilities.skills.inventory
+        ? `${selectedProvider} does not expose contextual skills yet.`
+        : "No enabled skills found. Disabled skills can be managed in Skills & MCP.";
     }
     return composerTriggerKind === "path"
       ? "No matching files or folders."
       : "No matching command.";
-  }, [composerTriggerKind]);
+  }, [composerTriggerKind, contextualExtensionsSnapshot, selectedProvider]);
 
   // ------------------------------------------------------------------
   // Provider traits UI
@@ -1589,6 +1613,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const next = replaceTextRange(promptRef.current, rangeStart, rangeEnd, replacement);
       const nextCursor = collapseExpandedComposerCursor(next.text, next.cursor);
       const nextExpandedCursor = expandCollapsedComposerCursor(next.text, nextCursor);
+      if (
+        composerEditorRef.current?.replaceRangeWithText({
+          rangeStart,
+          rangeEnd,
+          text: replacement,
+          ...(options?.expectedText !== undefined ? { expectedText: options.expectedText } : {}),
+        })
+      ) {
+        if (options?.focusEditorAfterReplace !== false) {
+          window.requestAnimationFrame(() => {
+            composerEditorRef.current?.focusAt(nextCursor);
+          });
+        }
+        return true;
+      }
       promptRef.current = next.text;
       const activePendingQuestion = activePendingProgress?.activeQuestion;
       if (activePendingQuestion && activePendingUserInput) {
@@ -1625,6 +1664,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     cursor: number;
     expandedCursor: number;
     terminalContextIds: string[];
+    selectedSkills: ProviderSelectedSkill[];
+    invalidSkillNames: string[];
   } => {
     const editorSnapshot = composerEditorRef.current?.readSnapshot();
     if (editorSnapshot) {
@@ -1635,6 +1676,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       cursor: composerCursor,
       expandedCursor: expandCollapsedComposerCursor(promptRef.current, composerCursor),
       terminalContextIds: composerTerminalContexts.map((context) => context.id),
+      selectedSkills: [],
+      invalidSkillNames: [],
     };
   }, [composerCursor, composerTerminalContexts, promptRef]);
 
@@ -1722,12 +1765,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           trigger.rangeEnd,
           replacement,
         );
-        const applied = applyPromptReplacement(
-          trigger.rangeStart,
-          replacementRangeEnd,
-          replacement,
-          { expectedText: snapshot.value.slice(trigger.rangeStart, replacementRangeEnd) },
-        );
+        const applied =
+          composerEditorRef.current?.replaceRangeWithSkill({
+            rangeStart: trigger.rangeStart,
+            rangeEnd: replacementRangeEnd,
+            skill: item.skill,
+          }) ?? false;
         if (applied) {
           setComposerHighlightedItemId(null);
         }
@@ -1811,6 +1854,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         event?.preventDefault();
         return;
       }
+      const invalidSkillNames = readComposerSnapshot().invalidSkillNames;
+      if (invalidSkillNames.length > 0) {
+        event?.preventDefault();
+        const names = [...new Set(invalidSkillNames)].map((name) => `$${name}`);
+        toastManager.add({
+          type: "warning",
+          title: "Resolve unavailable skills before sending",
+          description: `${names.join(", ")} ${names.length === 1 ? "is" : "are"} disabled, missing, or ambiguous. Remove the invalid chip or re-enable the exact skill.`,
+        });
+        return;
+      }
       // A send while a pasted image is still compressing would strand that
       // image: the turn snapshot wouldn't include it, and it would surface
       // in the *next* draft instead. Only oversized images hit this — small
@@ -1835,6 +1889,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       isSendDisabled,
       noProviderAvailable,
       onSend,
+      readComposerSnapshot,
       shouldBlurMobileComposerOnSubmit,
     ],
   );
@@ -2573,6 +2628,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           cursor: composerCursor,
           expandedCursor: expandCollapsedComposerCursor(promptRef.current, composerCursor),
           terminalContextIds: composerTerminalContexts.map((context) => context.id),
+          selectedSkills: [],
+          invalidSkillNames: [],
         };
         const insertion = insertInlineTerminalContextPlaceholder(
           snapshot.value,
@@ -2601,21 +2658,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           composerEditorRef.current?.focusAt(nextCollapsedCursor);
         });
       },
-      getSendContext: () => ({
-        prompt: promptRef.current,
-        images: composerImagesRef.current,
-        terminalContexts: composerTerminalContextsRef.current,
-        elementContexts: composerElementContextsRef.current,
-        previewAnnotations: composerPreviewAnnotations,
-        reviewComments: composerReviewComments,
-        selectedPromptEffort,
-        selectedModelOptionsForDispatch,
-        selectedModelSelection,
-        providerAvailable: !noProviderAvailable,
-        selectedProvider,
-        selectedModel,
-        selectedProviderModels,
-      }),
+      getSendContext: () => {
+        const skillState = readComposerSnapshot();
+        return {
+          prompt: promptRef.current,
+          images: composerImagesRef.current,
+          terminalContexts: composerTerminalContextsRef.current,
+          elementContexts: composerElementContextsRef.current,
+          previewAnnotations: composerPreviewAnnotations,
+          reviewComments: composerReviewComments,
+          selectedPromptEffort,
+          selectedModelOptionsForDispatch,
+          selectedModelSelection,
+          providerAvailable: !noProviderAvailable,
+          selectedProvider,
+          selectedModel,
+          selectedProviderModels,
+          selectedSkills: skillState.selectedSkills,
+          invalidSkillNames: skillState.invalidSkillNames,
+        };
+      },
     }),
     [
       activeThread,
@@ -3032,7 +3094,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     ? composerTerminalContexts
                     : []
                 }
-                skills={selectedProviderStatus?.skills ?? []}
+                skills={contextualSkills}
                 {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
                 onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
                 onChange={onPromptChange}

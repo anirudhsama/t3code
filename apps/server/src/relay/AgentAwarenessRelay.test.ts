@@ -201,6 +201,15 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
         },
       } as unknown as OrchestrationEvent),
     ).toBe(false);
+    for (const type of ["thread.skill-override-set", "thread.mcp-override-set"] as const) {
+      expect(
+        AgentAwarenessRelay.shouldPublishAgentAwarenessEvent({
+          ...base,
+          type,
+          payload: { threadId: "thread-1" as ThreadId },
+        } as unknown as OrchestrationEvent),
+      ).toBe(false);
+    }
   });
 
   it("deduplicates awareness state updates whose only change is their event timestamp", () => {
@@ -307,6 +316,9 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
       archivedAt: null,
       settledOverride: null,
       settledAt: null,
+      skillOverrides: {},
+      mcpOverrides: {},
+      extensionOverridesRevision: 0,
       session: null,
       latestUserMessageAt: null,
       hasPendingApprovals: false,
@@ -455,6 +467,9 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
           archivedAt: null,
           settledOverride: null,
           settledAt: null,
+          skillOverrides: {},
+          mcpOverrides: {},
+          extensionOverridesRevision: 0,
           session: {
             threadId,
             status: "running",
@@ -613,6 +628,9 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
           archivedAt: null,
           settledOverride: null,
           settledAt: null,
+          skillOverrides: {},
+          mcpOverrides: {},
+          extensionOverridesRevision: 0,
           session: {
             threadId,
             status: "running",

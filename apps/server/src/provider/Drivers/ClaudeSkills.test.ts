@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { discoverClaudeSkills } from "./ClaudeSkills.ts";
+import { discoverClaudeSkills, scanClaudeSkillCandidates } from "./ClaudeSkills.ts";
 
 const writeSkill = Effect.fn(function* (
   skillsDir: string,
@@ -66,7 +66,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     }),
   );
 
-  it.effect("prefers project skills over user skills on name collisions", () =>
+  it.effect("prefers personal skills over project skills on name collisions", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -88,8 +88,8 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
       const skills = yield* discoverClaudeSkills({ homePath: configDir }, workspace);
 
       assert.equal(skills.length, 1);
-      assert.equal(skills[0]?.scope, "project");
-      assert.equal(skills[0]?.description, "Project deploy.");
+      assert.equal(skills[0]?.scope, "user");
+      assert.equal(skills[0]?.description, "User deploy.");
     }),
   );
 
@@ -201,5 +201,61 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
 
       assert.deepEqual(skills, []);
     }),
+  );
+
+  it.effect(
+    "scans parent, additional, managed, and plugin roots without collapsing duplicates",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+        const repo = path.join(tempDir, "repo");
+        const cwd = path.join(repo, "packages", "app");
+        const configDir = path.join(tempDir, "config");
+        const additional = path.join(tempDir, "additional");
+        const managed = path.join(tempDir, "managed-skills");
+        const plugin = path.join(tempDir, "plugin");
+        yield* fs.makeDirectory(path.join(repo, ".git"), { recursive: true });
+        yield* fs.makeDirectory(cwd, { recursive: true });
+        yield* writeSkill(path.join(configDir, "skills"), "deploy", "---\nname: deploy\n---\n");
+        yield* writeSkill(
+          path.join(repo, ".claude", "skills"),
+          "deploy",
+          "---\nname: deploy\n---\n",
+        );
+        yield* writeSkill(
+          path.join(cwd, ".claude", "skills"),
+          "nested",
+          "---\nname: nested\n---\n",
+        );
+        yield* writeSkill(
+          path.join(additional, ".claude", "skills"),
+          "extra",
+          "---\nname: extra\n---\n",
+        );
+        yield* writeSkill(managed, "admin", "---\nname: admin\n---\n");
+        yield* writeSkill(path.join(plugin, "skills"), "review", "---\nname: review\n---\n");
+
+        const candidates = yield* scanClaudeSkillCandidates({
+          config: { homePath: configDir },
+          cwd,
+          additionalDirectories: [additional],
+          managedDirectories: [managed],
+          plugins: [{ name: "example", path: plugin }],
+        });
+
+        assert.deepEqual(
+          candidates.map(({ providerName, scope }) => [providerName, scope]),
+          [
+            ["admin", "admin"],
+            ["deploy", "user"],
+            ["nested", "project"],
+            ["deploy", "project"],
+            ["extra", "project"],
+            ["example:review", "plugin"],
+          ],
+        );
+      }),
   );
 });

@@ -615,6 +615,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             pinOrderKey: null,
             titleRegenerationRequestId: null,
             titleRegenerationStartedAt: null,
+            skillOverrides: {},
+            mcpOverrides: {},
+            extensionOverridesRevision: 0,
             latestUserMessageAt: null,
             pendingApprovalCount: 0,
             pendingUserInputCount: 0,
@@ -821,6 +824,50 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             interactionMode: event.payload.interactionMode,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.skill-override-set": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          const skillOverrides = { ...existingRow.value.skillOverrides };
+          if (event.payload.state === "inherit") {
+            delete skillOverrides[event.payload.skillId];
+          } else {
+            skillOverrides[event.payload.skillId] = event.payload.state;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            skillOverrides,
+            extensionOverridesRevision: event.payload.extensionOverridesRevision,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.mcp-override-set": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          const mcpOverrides = { ...existingRow.value.mcpOverrides };
+          if (event.payload.state === "inherit") {
+            delete mcpOverrides[event.payload.mcpServerId];
+          } else {
+            mcpOverrides[event.payload.mcpServerId] = event.payload.state;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            mcpOverrides,
+            extensionOverridesRevision: event.payload.extensionOverridesRevision,
             updatedAt: event.payload.updatedAt,
           });
           return;

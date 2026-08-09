@@ -50,6 +50,9 @@ function makeThread(
     checkpoints: [],
     session: null,
     ...input,
+    skillOverrides: input.skillOverrides ?? {},
+    mcpOverrides: input.mcpOverrides ?? {},
+    extensionOverridesRevision: input.extensionOverridesRevision ?? 0,
     settledOverride: input.settledOverride ?? null,
     settledAt: input.settledAt ?? null,
   };

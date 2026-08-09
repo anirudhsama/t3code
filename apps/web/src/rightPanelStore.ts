@@ -21,6 +21,7 @@ export const RIGHT_PANEL_KINDS = [
   "preview",
   "terminal",
   "agents",
+  "extensions",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
@@ -44,16 +45,18 @@ export type RightPanelSurface =
       revealLine: number | null;
       revealRequestId: number;
     }
-  | { id: "agents"; kind: "agents" };
+  | { id: "agents"; kind: "agents" }
+  | { id: "extensions"; kind: "extensions" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-// v9 removed the "plan" surface kind (plans render inline in the transcript).
-const RIGHT_PANEL_STORAGE_VERSION = 9;
+// v11 persists whether the inventory-only Skills section is collapsed.
+const RIGHT_PANEL_STORAGE_VERSION = 11;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
   activeSurfaceId: string | null;
   surfaces: RightPanelSurface[];
+  extensionsSkillsCollapsed?: boolean;
 }
 
 interface RightPanelStoreState {
@@ -81,6 +84,7 @@ interface RightPanelStoreState {
   close: (ref: ScopedThreadRef) => void;
   toggleVisibility: (ref: ScopedThreadRef) => void;
   toggle: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "file" | "terminal">) => void;
+  setExtensionsSkillsCollapsed: (ref: ScopedThreadRef, collapsed: boolean) => void;
   removeThread: (ref: ScopedThreadRef) => void;
 }
 
@@ -100,6 +104,8 @@ const singletonSurface = (
       return { id: "files", kind };
     case "agents":
       return { id: "agents", kind };
+    case "extensions":
+      return { id: "extensions", kind };
   }
 };
 
@@ -531,6 +537,14 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             }
             return upsertSurface(current, singletonSurface(kind));
           }),
+        })),
+      setExtensionsSkillsCollapsed: (ref, collapsed) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+            current.extensionsSkillsCollapsed === collapsed
+              ? current
+              : { ...current, extensionsSkillsCollapsed: collapsed },
+          ),
         })),
       removeThread: (ref) =>
         set((state) => {

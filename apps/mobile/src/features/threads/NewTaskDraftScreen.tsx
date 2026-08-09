@@ -7,7 +7,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useFontFamily } from "../../lib/useFontFamily";
 
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { selectEffectiveThreadSkills } from "@t3tools/client-runtime/state/extensions";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -45,10 +46,14 @@ import { deriveThreadTitleFromPrompt } from "../../lib/projectThreadStartTurn";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage, removeThreadOutboxMessage } from "../../state/thread-outbox";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
+import { extensionsEnvironment } from "../../state/extensions";
+import { useEnvironmentQuery } from "../../state/query";
+import { uuidv4 } from "../../lib/uuid";
 import { branchBadgeLabel, useNewTaskFlow } from "./new-task-flow-provider";
 import { useCreateProjectThread } from "./use-project-actions";
 import { resolveDraftProjectSelection } from "./new-task-project-selection";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
+import { resolveSelectedSkills, retainSelectedSkillsInText } from "./composerSkills";
 
 function formatWorkspaceLabel(input: {
   readonly workspaceMode: string;
@@ -88,6 +93,28 @@ export function NewTaskDraftScreen(props: {
   const isKeyboardVisible = useKeyboardState((state) => state.isVisible);
   const controlsBottomPadding = isKeyboardVisible ? 8 : Math.max(insets.bottom, 10);
   const { projectScopes, selectedProject, selectedProjectKey, setProject } = flow;
+  const [hasCreatedThread, setHasCreatedThread] = useState(false);
+  const generatedDraftThreadIdRef = useRef<ThreadId | null>(null);
+  if (generatedDraftThreadIdRef.current === null) {
+    generatedDraftThreadIdRef.current = ThreadId.make(uuidv4());
+  }
+  const draftThreadId = flow.editingPendingTask?.threadId ?? generatedDraftThreadIdRef.current;
+  const extensionsQuery = useEnvironmentQuery(
+    !hasCreatedThread && selectedProject && flow.selectedModel
+      ? extensionsEnvironment.previewSnapshot({
+          environmentId: selectedProject.environmentId,
+          input: {
+            threadId: draftThreadId,
+            projectId: selectedProject.id,
+            providerInstanceId: flow.selectedModel.instanceId,
+          },
+        })
+      : null,
+  );
+  const contextualSkills = useMemo(
+    () => selectEffectiveThreadSkills(extensionsQuery.data),
+    [extensionsQuery.data],
+  );
   const { connectedEnvironments } = useRemoteConnectionStatus();
   const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
     selectedProject?.environmentId ?? null,
@@ -731,6 +758,15 @@ export function NewTaskDraftScreen(props: {
     const runtimeMode = draft.runtimeMode ?? flow.runtimeMode;
     const interactionMode = draft.interactionMode ?? flow.interactionMode;
     const initialMessageText = draft.text.trim();
+    const editingPendingTask = flow.editingPendingTask;
+    const selectedSkills =
+      contextualSkills.length > 0
+        ? resolveSelectedSkills(
+            initialMessageText,
+            contextualSkills,
+            editingPendingTask?.selectedSkills ?? [],
+          )
+        : retainSelectedSkillsInText(initialMessageText, editingPendingTask?.selectedSkills ?? []);
 
     if (
       !modelSelection ||
@@ -740,8 +776,6 @@ export function NewTaskDraftScreen(props: {
     ) {
       return;
     }
-
-    const editingPendingTask = flow.editingPendingTask;
 
     if (!environmentConnected) {
       // Offline: park the task in the outbox; the drain sends it when the
@@ -754,8 +788,8 @@ export function NewTaskDraftScreen(props: {
             messageId: editingPendingTask.messageId,
             createdAt: editingPendingTask.createdAt,
           }
-        : makeTurnCommandMetadata();
-      const message = flow.buildPendingTaskMessage(metadata);
+        : makeTurnCommandMetadata(draftThreadId);
+      const message = flow.buildPendingTaskMessage(metadata, selectedSkills);
       if (!message) {
         return;
       }
@@ -801,18 +835,17 @@ export function NewTaskDraftScreen(props: {
       startFromOrigin,
       runtimeMode,
       interactionMode,
+      selectedSkills,
       initialMessageText,
       initialAttachments: draft.attachments,
-      ...(editingPendingTask
+      turnMetadata: editingPendingTask
         ? {
-            turnMetadata: {
-              threadId: editingPendingTask.threadId,
-              commandId: editingPendingTask.commandId,
-              messageId: editingPendingTask.messageId,
-              createdAt: editingPendingTask.createdAt,
-            },
+            threadId: editingPendingTask.threadId,
+            commandId: editingPendingTask.commandId,
+            messageId: editingPendingTask.messageId,
+            createdAt: editingPendingTask.createdAt,
           }
-        : {}),
+        : makeTurnCommandMetadata(draftThreadId),
     });
     flow.setSubmitting(false);
 
@@ -826,6 +859,8 @@ export function NewTaskDraftScreen(props: {
       }
       return;
     }
+
+    setHasCreatedThread(true);
 
     if (editingPendingTask) {
       try {
@@ -887,7 +922,7 @@ export function NewTaskDraftScreen(props: {
       multiline
       scrollEnabled={isExpanded}
       value={flow.prompt}
-      skills={flow.selectedProviderSkills}
+      skills={contextualSkills}
       onChangeText={flow.setPrompt}
       onFocus={() => setIsComposerFocused(true)}
       onBlur={() => setIsComposerFocused(false)}

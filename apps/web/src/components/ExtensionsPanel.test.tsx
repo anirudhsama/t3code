@@ -1,0 +1,438 @@
+import {
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderExtensionItemId,
+  ProviderInstanceId,
+  ProjectId,
+  ThreadId,
+  type ThreadExtensionsSnapshot,
+} from "@t3tools/contracts";
+import { renderToStaticMarkup } from "react-dom/server";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { describe, expect, it } from "vite-plus/test";
+
+import { ExtensionsPanel, McpRow } from "./ExtensionsPanel";
+import { useRightPanelStore } from "../rightPanelStore";
+
+const environmentId = EnvironmentId.make("environment-local");
+const threadId = ThreadId.make("thread-1");
+
+function snapshot(): ThreadExtensionsSnapshot {
+  return {
+    threadId,
+    providerInstanceId: ProviderInstanceId.make("codex-work"),
+    provider: ProviderDriverKind.make("codex"),
+    cwd: "/repo",
+    capabilities: {
+      skills: { inventory: true, refresh: true, threadOverride: true },
+      mcp: {
+        inventory: true,
+        liveStatus: true,
+        threadOverride: true,
+        reconnect: true,
+        authenticate: true,
+      },
+    },
+    skills: [
+      {
+        id: ProviderExtensionItemId.make("/repo/.agents/skills/review/SKILL.md"),
+        name: "review",
+        description: "Review this repository",
+        scope: "project",
+        path: "/repo/.agents/skills/review/SKILL.md",
+        providerEnabled: true,
+        threadOverride: "disabled",
+        effectiveEnabled: false,
+      },
+    ],
+    mcpServers: [
+      {
+        id: ProviderExtensionItemId.make("t3-code"),
+        name: "t3-code",
+        origins: [{ scope: "system", label: "T3 runtime", effective: true }],
+        providerEnabled: true,
+        threadOverride: "inherit",
+        effectiveEnabled: true,
+        managed: true,
+        toggleable: false,
+        startupStatus: "ready",
+        authStatus: "not-required",
+        statusObserved: true,
+        toolCount: 3,
+        resourceCount: 0,
+        resourceTemplateCount: 0,
+      },
+    ],
+    inventoryRevision: 1,
+    overrideRevision: 2,
+    appliedOverrideRevision: 2,
+    loading: { skills: false, mcp: false },
+    errors: [],
+    refreshedAt: "2026-08-09T00:00:00.000Z",
+  };
+}
+
+function render(
+  snapshotValue: ThreadExtensionsSnapshot | null,
+  options?: {
+    activeTurn?: boolean;
+    durable?: boolean;
+    isLoading?: boolean;
+    skillsCollapsed?: boolean;
+  },
+): string {
+  const ref = scopeThreadRef(environmentId, threadId);
+  useRightPanelStore.setState({
+    byThreadKey: {
+      [scopedThreadKey(ref)]: {
+        isOpen: true,
+        activeSurfaceId: "extensions",
+        surfaces: [{ id: "extensions", kind: "extensions" }],
+        extensionsSkillsCollapsed: options?.skillsCollapsed ?? true,
+      },
+    },
+  });
+  return renderToStaticMarkup(
+    <ExtensionsPanel
+      environmentId={environmentId}
+      threadId={threadId}
+      snapshot={snapshotValue}
+      loadError={null}
+      isLoading={options?.isLoading ?? false}
+      projectId={null}
+      providerInstanceId={null}
+      durable={options?.durable ?? true}
+      activeTurn={options?.activeTurn ?? false}
+      draftMcpOverrides={{}}
+      isAuthClientLocal={false}
+      {...(options?.skillsCollapsed === undefined
+        ? {}
+        : { skillsCollapsed: options.skillsCollapsed })}
+      onSetDraftMcpOverride={() => {}}
+    />,
+  );
+}
+
+describe("ExtensionsPanel", () => {
+  it("puts MCP first and keeps inventory-only skills collapsed by default", () => {
+    const markup = render(snapshot());
+
+    expect(markup).toContain("codex-work");
+    expect(markup).toContain("/repo");
+    expect(markup).not.toContain("Review this repository");
+    expect(markup.indexOf('id="extensions-mcp-heading"')).toBeLessThan(
+      markup.indexOf('id="extensions-skills-heading"'),
+    );
+    expect(markup).toContain("Managed by T3 Code and required for runtime coordination");
+    expect(markup).toContain("MCP changes control future availability");
+    expect(markup).not.toContain("Provider default:");
+    expect(markup).not.toContain("Thread: Inherit");
+  });
+
+  it("renders skill provenance without override controls when expanded", () => {
+    const markup = render(snapshot(), { skillsCollapsed: false });
+    expect(markup).toContain("Review this repository");
+    expect(markup).not.toContain("Disable review for this thread");
+    expect(markup).not.toContain("Provider default:");
+  });
+
+  it("renders prominent per-section skeletons during the first discovery", () => {
+    const markup = render(null, { isLoading: true, skillsCollapsed: false });
+
+    expect(markup).toContain('aria-label="Discovering MCP servers…"');
+    expect(markup).toContain('aria-label="Discovering skills…"');
+    expect(markup).toContain('data-slot="skeleton"');
+    expect(markup).not.toContain("0 configured");
+    expect(markup).not.toContain("0 discovered");
+    expect(markup).not.toContain("No matching MCP servers");
+  });
+
+  it("retains measured rows while refreshing in place", () => {
+    const value = snapshot();
+    const markup = render(
+      { ...value, loading: { skills: true, mcp: true } },
+      { isLoading: true, skillsCollapsed: false },
+    );
+
+    expect(markup).toContain("1 configured");
+    expect(markup).toContain("1 discovered");
+    expect(markup).toContain("t3-code");
+    expect(markup).toContain("Review this repository");
+    expect(markup).not.toContain('aria-label="Discovering MCP servers…"');
+  });
+
+  it("sorts MCP provenance groups and skill rows deterministically", () => {
+    const value = snapshot();
+    const mcpServer = value.mcpServers[0]!;
+    const skill = value.skills[0]!;
+    const markup = render(
+      {
+        ...value,
+        mcpServers: [
+          {
+            ...mcpServer,
+            id: ProviderExtensionItemId.make("runtime-zeta"),
+            name: "zeta-runtime",
+            origins: [{ scope: "system", label: "Runtime", effective: true }],
+          },
+          {
+            ...mcpServer,
+            id: ProviderExtensionItemId.make("user-alpha"),
+            name: "alpha-user",
+            origins: [{ scope: "user", label: "User config", effective: true }],
+          },
+          {
+            ...mcpServer,
+            id: ProviderExtensionItemId.make("project-zeta"),
+            name: "zeta-project",
+            origins: [{ scope: "project", label: "Project config", effective: true }],
+          },
+          {
+            ...mcpServer,
+            id: ProviderExtensionItemId.make("project-alpha"),
+            name: "alpha-project",
+            origins: [{ scope: "project", label: "Project config", effective: true }],
+          },
+        ],
+        skills: [
+          { ...skill, id: ProviderExtensionItemId.make("zeta"), name: "zeta" },
+          { ...skill, id: ProviderExtensionItemId.make("alpha"), name: "alpha" },
+        ],
+      },
+      { skillsCollapsed: false },
+    );
+
+    const orderedIds = ["project-alpha", "project-zeta", "user-alpha", "runtime-zeta"];
+    for (let index = 1; index < orderedIds.length; index += 1) {
+      expect(markup.indexOf(`data-extension-mcp-id="${orderedIds[index - 1]}"`)).toBeLessThan(
+        markup.indexOf(`data-extension-mcp-id="${orderedIds[index]}"`),
+      );
+    }
+    expect(markup.indexOf('data-extension-skill-id="alpha"')).toBeLessThan(
+      markup.indexOf('data-extension-skill-id="zeta"'),
+    );
+  });
+
+  it("explains contributing and active config layers directly", () => {
+    const value = snapshot();
+    const markup = render({
+      ...value,
+      mcpServers: [
+        {
+          ...value.mcpServers[0]!,
+          origins: [
+            { scope: "project", label: "Project config", effective: true },
+            { scope: "user", label: "User config", effective: false },
+          ],
+        },
+      ],
+    });
+
+    expect(markup).toContain("Defined in: Project config, User config");
+    expect(markup).toContain("Active: Project config");
+    expect(markup).not.toContain("Origin stack");
+    expect(markup).not.toContain("Effective ·");
+  });
+
+  it("shows only the active scope for a single provider-declared origin", () => {
+    const markup = render(snapshot());
+
+    expect(markup).toContain("Active: T3 runtime");
+    expect(markup).not.toContain("Defined in: T3 runtime");
+  });
+
+  it("explains unsupported inventory without hiding either section", () => {
+    const value = snapshot();
+    const markup = render(
+      {
+        ...value,
+        capabilities: {
+          skills: { inventory: false, refresh: false, threadOverride: false },
+          mcp: {
+            inventory: false,
+            liveStatus: false,
+            threadOverride: false,
+            reconnect: false,
+            authenticate: false,
+          },
+        },
+        skills: [],
+        mcpServers: [],
+      },
+      { skillsCollapsed: false },
+    );
+
+    expect(markup).toContain("does not expose contextual skill inventory yet");
+    expect(markup).toContain("does not expose MCP inventory or thread-local enablement yet");
+  });
+
+  it("ties pending copy to desired and applied revisions during a turn", () => {
+    const value = snapshot();
+    const markup = render({ ...value, appliedOverrideRevision: 1 }, { activeTurn: true });
+
+    expect(markup).toContain("saved and pending until the current turn completes");
+  });
+
+  it("omits status and count placeholders until live status is observed", () => {
+    const value = snapshot();
+    const markup = render({
+      ...value,
+      mcpServers: [
+        {
+          ...value.mcpServers[0]!,
+          startupStatus: "unknown",
+          authStatus: "unknown",
+          statusObserved: false,
+        },
+      ],
+    });
+    expect(markup).not.toContain("status unknown");
+    expect(markup).not.toContain("0 resources");
+    expect(markup).toContain("Status appears once discovery runs or the session starts");
+  });
+
+  it("shows draft MCP intent without the old read-only banner", () => {
+    const value = snapshot();
+    const markup = renderToStaticMarkup(
+      <ExtensionsPanel
+        environmentId={environmentId}
+        threadId={threadId}
+        projectId={ProjectId.make("project-1")}
+        providerInstanceId={value.providerInstanceId}
+        snapshot={{
+          ...value,
+          overrideRevision: 0,
+          appliedOverrideRevision: 0,
+          mcpServers: [
+            {
+              ...value.mcpServers[0]!,
+              id: ProviderExtensionItemId.make("docs"),
+              name: "docs",
+              managed: false,
+              toggleable: true,
+            },
+          ],
+        }}
+        loadError={null}
+        isLoading={false}
+        durable={false}
+        activeTurn={false}
+        draftMcpOverrides={{ [ProviderExtensionItemId.make("docs")]: "disabled" }}
+        isAuthClientLocal={false}
+        skillsCollapsed
+        onSetDraftMcpOverride={() => {}}
+      />,
+    );
+    expect(markup).not.toContain("Send the first message");
+    expect(markup).toContain("Will apply when this thread is created");
+  });
+
+  it("shows remote paste-back instructions and keeps the login URL as a secondary action", () => {
+    const value = snapshot();
+    const server = {
+      ...value.mcpServers[0]!,
+      id: ProviderExtensionItemId.make("docs"),
+      name: "docs",
+      managed: false,
+      toggleable: true,
+      authStatus: "needs-auth" as const,
+    };
+    const markup = renderToStaticMarkup(
+      <McpRow
+        server={server}
+        durable
+        disabled={false}
+        pending={false}
+        authState={{
+          phase: "waiting",
+          authorizationUrl: "https://provider.example/authorize",
+          pasteVisible: true,
+        }}
+        callbackUrl="http://127.0.0.1:43123/callback/state?code=secret"
+        capabilities={value.capabilities.mcp}
+        onSet={() => {}}
+        onReconnect={() => {}}
+        onAuthenticate={() => {}}
+        onCopyAuthUrl={() => {}}
+        onCallbackUrlChange={() => {}}
+        onRelayCallback={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("Copy login URL");
+    expect(markup).toContain("copy the full 127.0.0.1 redirect URL");
+    expect(markup).toContain("Submit redirect");
+    expect(markup).toContain('aria-label="Redirect URL for docs"');
+  });
+
+  it("renders Claude host auth guidance and does not invent absent inventory counts", () => {
+    const value = snapshot();
+    const {
+      toolCount: _toolCount,
+      resourceCount: _resourceCount,
+      resourceTemplateCount: _resourceTemplateCount,
+      ...source
+    } = value.mcpServers[0]!;
+    const markup = renderToStaticMarkup(
+      <McpRow
+        server={{
+          ...source,
+          id: ProviderExtensionItemId.make("docs"),
+          name: "docs",
+          managed: false,
+          toggleable: true,
+          authStatus: "needs-auth",
+        }}
+        durable={false}
+        disabled={false}
+        pending={false}
+        authState={null}
+        callbackUrl=""
+        capabilities={{ ...value.capabilities.mcp, authenticate: false }}
+        onSet={() => {}}
+        onReconnect={() => {}}
+        onAuthenticate={() => {}}
+        onCopyAuthUrl={() => {}}
+        onCallbackUrlChange={() => {}}
+        onRelayCallback={() => {}}
+      />,
+    );
+
+    expect(markup).toContain(
+      "Authenticate with Claude Code on the machine running this T3 Code server.",
+    );
+    expect(markup).toContain("claude mcp login docs");
+    expect(markup).toContain("Inventory counts not reported.");
+    expect(markup).not.toContain(">Authenticate<");
+    expect(markup).not.toContain("0 resources");
+  });
+
+  it("uses singular inventory count labels", () => {
+    const value = snapshot();
+    const markup = renderToStaticMarkup(
+      <McpRow
+        server={{
+          ...value.mcpServers[0]!,
+          toolCount: 1,
+          resourceCount: 1,
+          resourceTemplateCount: 1,
+        }}
+        durable
+        disabled={false}
+        pending={false}
+        authState={null}
+        callbackUrl=""
+        capabilities={value.capabilities.mcp}
+        onSet={() => {}}
+        onReconnect={() => {}}
+        onAuthenticate={() => {}}
+        onCopyAuthUrl={() => {}}
+        onCallbackUrlChange={() => {}}
+        onRelayCallback={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("1 tool · 1 resource · 1 template");
+    expect(markup).not.toContain("1 tools");
+  });
+});

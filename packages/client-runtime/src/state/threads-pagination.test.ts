@@ -110,6 +110,9 @@ const BASE_THREAD: OrchestrationThread = {
   activities: [],
   checkpoints: [checkpoint("turn-2", 2)],
   session: null,
+  skillOverrides: {},
+  mcpOverrides: {},
+  extensionOverridesRevision: 0,
 };
 
 const WINDOWED_SNAPSHOT: OrchestrationThreadDetailSnapshot = {

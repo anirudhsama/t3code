@@ -215,6 +215,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         enabled,
         snapshot,
         adapter,
+        extensions: adapter.extensions,
         textGeneration,
       } satisfies ProviderInstance;
     }),

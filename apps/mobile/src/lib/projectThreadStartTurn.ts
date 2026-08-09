@@ -5,6 +5,7 @@ import {
   type ModelSelection,
   type ProjectId,
   type ProviderInteractionMode,
+  type ProviderSelectedSkill,
   type RuntimeMode,
 } from "@t3tools/contracts";
 
@@ -32,6 +33,7 @@ export interface ProjectThreadStartTurnSpec {
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly selectedSkills?: ReadonlyArray<ProviderSelectedSkill>;
   readonly workspaceMode: "local" | "worktree";
   readonly branch: string | null;
   readonly worktreePath: string | null;
@@ -61,6 +63,9 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
     titleSeed: title,
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
+    ...(spec.selectedSkills && spec.selectedSkills.length > 0
+      ? { selectedSkills: spec.selectedSkills }
+      : {}),
     bootstrap: {
       createThread: {
         projectId: spec.projectId,

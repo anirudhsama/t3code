@@ -301,7 +301,6 @@ function makeCodexProbeSnapshot(
         capabilities: codexModelCapabilities,
       },
     ],
-    skills: [],
     ...input,
   };
 }
@@ -342,22 +341,20 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
   "ProviderRegistry",
   (it) => {
     describe("checkCodexProviderStatus", () => {
+      it.effect("does not bind contextual skills to the provider probe cwd", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(makeCodexProbeSnapshot()),
+          );
+
+          assert.deepStrictEqual(status.skills, []);
+        }),
+      );
+
       it.effect("uses the app-server account and model list for provider status", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
-            Effect.succeed(
-              makeCodexProbeSnapshot({
-                skills: [
-                  {
-                    name: "github:gh-fix-ci",
-                    path: "/Users/test/.codex/skills/gh-fix-ci/SKILL.md",
-                    enabled: true,
-                    displayName: "CI Debug",
-                    shortDescription: "Debug failing GitHub Actions checks",
-                  },
-                ],
-              }),
-            ),
+            Effect.succeed(makeCodexProbeSnapshot()),
           );
           assert.strictEqual(status.status, "ready");
           assert.strictEqual(status.installed, true);
@@ -374,15 +371,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               capabilities: codexModelCapabilities,
             },
           ]);
-          assert.deepStrictEqual(status.skills, [
-            {
-              name: "github:gh-fix-ci",
-              path: "/Users/test/.codex/skills/gh-fix-ci/SKILL.md",
-              enabled: true,
-              displayName: "CI Debug",
-              shortDescription: "Debug failing GitHub Actions checks",
-            },
-          ]);
+          assert.deepStrictEqual(status.skills, []);
         }),
       );
 

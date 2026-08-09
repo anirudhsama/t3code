@@ -114,6 +114,9 @@ function makeReadModel(
       activities: [],
       proposedPlans: [],
       checkpoints: [],
+      skillOverrides: {},
+      mcpOverrides: {},
+      extensionOverridesRevision: 0,
       deletedAt: null,
     })),
   };

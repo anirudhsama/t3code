@@ -6,8 +6,10 @@ import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
+  ProviderExtensionItemId,
   ProviderInstanceId,
   ProviderItemId,
   type ProviderApprovalDecision,
@@ -32,21 +34,43 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
+import { FetchHttpClient } from "effect/unstable/http";
 import * as CodexErrors from "effect-codex-app-server/errors";
+import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { ProviderAdapterValidationError } from "../Errors.ts";
+import {
+  type ProviderAdapterError,
+  ProviderAdapterStaleSkillSelectionError,
+  ProviderAdapterValidationError,
+  ProviderMcpAuthError,
+} from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
+import type { ProviderExtensionsShape } from "../Services/ThreadExtensions.ts";
 import {
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
+  type CodexSessionRuntimeStartInput,
   type CodexSessionRuntimeShape,
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
-import { makeCodexAdapter } from "./CodexAdapter.ts";
+import {
+  CODEX_EXTENSION_CAPABILITIES,
+  compileCodexExtensionConfig,
+  makeCodexAdapter,
+  matchesMcpOAuthCallbackTarget,
+  parseCodexMcpDefinitions,
+  parseMcpOAuthCallbackTarget,
+  relayMcpOAuthCallbackRequest,
+} from "./CodexAdapter.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+const isProviderAdapterStaleSkillSelectionError = Schema.is(
+  ProviderAdapterStaleSkillSelectionError,
+);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
 class CodexAdapter extends Context.Service<CodexAdapter, CodexAdapterShape>()(
@@ -62,7 +86,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
   private readonly now = "2026-01-01T00:00:00.000Z";
 
-  public readonly startImpl = vi.fn(() =>
+  public readonly startImpl = vi.fn((_input?: CodexSessionRuntimeStartInput) =>
     Promise.resolve({
       provider: ProviderDriverKind.make("codex"),
       status: "ready" as const,
@@ -115,14 +139,68 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   public readonly closeImpl = vi.fn(() => Promise.resolve(undefined));
 
+  public readonly listSkillsImpl = vi.fn(
+    (input: {
+      readonly cwd: string;
+      readonly forceReload?: boolean;
+    }): Promise<EffectCodexSchema.V2SkillsListResponse> =>
+      Promise.resolve({
+        data: [{ cwd: input.cwd, skills: [], errors: [] }],
+      }),
+  );
+
+  public readonly readMcpConfigImpl = vi.fn(
+    (_cwd: string): Promise<EffectCodexSchema.V2ConfigReadResponse> =>
+      Promise.resolve({
+        config: {},
+        origins: {},
+        layers: [],
+      }),
+  );
+
+  public readonly listMcpServerStatusImpl = vi.fn(
+    (): Promise<EffectCodexSchema.V2ListMcpServerStatusResponse> =>
+      Promise.resolve({
+        data: [],
+        nextCursor: null,
+      }),
+  );
+
+  public readonly beginMcpAuthImpl = vi.fn((_name: string) =>
+    Promise.resolve({ authorizationUrl: "https://example.test/authorize" }),
+  );
+
   readonly options: CodexSessionRuntimeOptions;
 
   constructor(options: CodexSessionRuntimeOptions) {
     this.options = options;
   }
 
-  start() {
-    return Effect.promise(() => this.startImpl());
+  initialize = Effect.void;
+
+  start(input?: CodexSessionRuntimeStartInput) {
+    return Effect.promise(() => this.startImpl(input));
+  }
+
+  listSkills(input: { readonly cwd: string; readonly forceReload?: boolean }) {
+    return Effect.promise(() => this.listSkillsImpl(input));
+  }
+
+  readMcpConfig(cwd: string) {
+    return Effect.promise(() => this.readMcpConfigImpl(cwd));
+  }
+
+  listMcpServerStatus = Effect.tryPromise({
+    try: () => this.listMcpServerStatusImpl(),
+    catch: (cause) =>
+      new CodexErrors.CodexAppServerTransportError({
+        operation: "read-input-stream",
+        cause,
+      }),
+  });
+
+  beginMcpAuth(name: string) {
+    return Effect.promise(() => this.beginMcpAuthImpl(name));
   }
 
   getSession = Effect.promise(() => this.startImpl());
@@ -160,16 +238,18 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 }
 
-function makeRuntimeFactory() {
+function makeRuntimeFactory(configure?: (runtime: FakeCodexRuntime) => void) {
   const runtimes: Array<FakeCodexRuntime> = [];
   const factory = vi.fn((options: CodexSessionRuntimeOptions) => {
     const runtime = new FakeCodexRuntime(options);
+    configure?.(runtime);
     runtimes.push(runtime);
     return Effect.succeed(runtime);
   });
 
   return {
     factory,
+    runtimes,
     get lastRuntime(): FakeCodexRuntime | undefined {
       return runtimes.at(-1);
     },
@@ -1234,6 +1314,1041 @@ scopedFailureLayer("CodexAdapterLive scoped startup failure", (it) => {
         asThreadId("thread-fail"),
       ]);
       NodeAssert.equal(yield* adapter.hasSession(asThreadId("thread-fail")), false);
+    }),
+  );
+});
+
+function withExtensionsTestAdapter<A>(
+  runtimeFactory: ReturnType<typeof makeRuntimeFactory>,
+  use: (
+    adapter: CodexAdapterShape & { readonly extensions: ProviderExtensionsShape },
+  ) => Effect.Effect<A, ProviderAdapterError, Scope.Scope>,
+  options?: {
+    readonly managementIdleTimeoutMs?: number;
+    readonly relayMcpOAuthCallback?: (
+      callbackUrl: string,
+    ) => Effect.Effect<void, ProviderMcpAuthError>;
+  },
+) {
+  return Effect.gen(function* () {
+    const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+      makeRuntime: runtimeFactory.factory,
+      ...options,
+    });
+    return yield* use(adapter);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
+          Layer.provide(NodeServices.layer),
+        ),
+        NodeServices.layer,
+      ),
+    ),
+    Effect.scoped,
+  );
+}
+
+it("compiles sparse Codex overrides and drops the managed t3-code MCP override", () => {
+  NodeAssert.deepStrictEqual(
+    compileCodexExtensionConfig({
+      skillOverrides: {
+        [ProviderExtensionItemId.make("/workspace/.agents/skills/review/SKILL.md")]: "disabled",
+      },
+      mcpOverrides: {
+        [ProviderExtensionItemId.make("postgres")]: "enabled",
+        [ProviderExtensionItemId.make("t3-code")]: "disabled",
+      },
+    }),
+    {
+      skills: {
+        config: [
+          {
+            path: "/workspace/.agents/skills/review/SKILL.md",
+            enabled: false,
+          },
+        ],
+      },
+      mcp_servers: {
+        postgres: { enabled: true },
+      },
+    },
+  );
+});
+
+it("accepts only the exact pending loopback callback target", () => {
+  const redirectUri = "http://127.0.0.1:43123/callback/nonce";
+  const target = parseMcpOAuthCallbackTarget(
+    `https://provider.example/authorize?redirect_uri=${encodeURIComponent(redirectUri)}`,
+  );
+  NodeAssert.ok(target);
+
+  const cases = [
+    ["http://127.0.0.1:43123/callback/nonce?code=opaque", true],
+    ["https://127.0.0.1:43123/callback/nonce?code=opaque", false],
+    ["http://localhost:43123/callback/nonce?code=opaque", false],
+    ["http://127.0.0.2:43123/callback/nonce?code=opaque", false],
+    ["http://127.0.0.1:43124/callback/nonce?code=opaque", false],
+    ["http://127.0.0.1:43123/callback/other?code=opaque", false],
+    ["http://user@127.0.0.1:43123/callback/nonce?code=opaque", false],
+    ["http://127.0.0.1:43123/callback/nonce?code=opaque#fragment", false],
+  ] as const;
+
+  for (const [callbackUrl, expected] of cases) {
+    NodeAssert.equal(matchesMcpOAuthCallbackTarget(callbackUrl, target), expected, callbackUrl);
+  }
+  NodeAssert.equal(
+    parseMcpOAuthCallbackTarget(
+      "https://provider.example/authorize?redirect_uri=https%3A%2F%2F127.0.0.1%3A43123%2Fcallback",
+    ),
+    null,
+  );
+});
+
+it.effect("relays the original callback query without following redirects", () => {
+  const calls: Array<{
+    readonly input: Parameters<typeof globalThis.fetch>[0];
+    readonly init: Parameters<typeof globalThis.fetch>[1];
+  }> = [];
+  const fetchImpl: typeof globalThis.fetch = Object.assign(
+    (
+      input: Parameters<typeof globalThis.fetch>[0],
+      init?: Parameters<typeof globalThis.fetch>[1],
+    ) => {
+      calls.push({ input, init });
+      return Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://should-not-be-followed.example" },
+        }),
+      );
+    },
+    { preconnect: globalThis.fetch.preconnect },
+  );
+  const callbackUrl =
+    "http://127.0.0.1:43123/callback/docs?code=opaque%2Fvalue&state=one&state=two";
+
+  return relayMcpOAuthCallbackRequest(callbackUrl).pipe(
+    Effect.provideService(FetchHttpClient.Fetch, fetchImpl),
+    Effect.tap(() =>
+      Effect.sync(() => {
+        NodeAssert.equal(calls.length, 1);
+        NodeAssert.equal(String(calls[0]!.input), callbackUrl);
+        NodeAssert.equal(calls[0]!.init?.redirect, "manual");
+      }),
+    ),
+  );
+});
+
+it.effect("tracks MCP OAuth begin, relay, completion, timeout, and retry", () => {
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtime.beginMcpAuthImpl.mockImplementation((name) => {
+      if (name === "unsafe") {
+        return Promise.resolve({
+          authorizationUrl:
+            "https://provider.example/authorize?redirect_uri=https%3A%2F%2Fexample.test%2Fcallback%3Fcode%3Dauthorization-secret",
+        });
+      }
+      const redirectUri = `http://127.0.0.1:43123/callback/${name}`;
+      return Promise.resolve({
+        authorizationUrl: `https://provider.example/authorize?redirect_uri=${encodeURIComponent(redirectUri)}`,
+      });
+    });
+  });
+  const relayed: Array<string> = [];
+  const threadId = asThreadId("thread-mcp-oauth-relay");
+  const input = {
+    threadId,
+    cwd: "/workspace/mcp-oauth",
+    mcpServerId: ProviderExtensionItemId.make("docs"),
+  } as const;
+
+  return withExtensionsTestAdapter(
+    runtimeFactory,
+    (adapter) =>
+      Effect.gen(function* () {
+        const noPending = yield* adapter.extensions.mcp!.relayAuthenticationCallback!({
+          ...input,
+          callbackUrl: "http://127.0.0.1:43123/callback/docs?code=opaque",
+        }).pipe(Effect.flip, Effect.orDie);
+        NodeAssert.equal(noPending._tag, "ProviderMcpAuthError");
+        NodeAssert.equal(noPending.reason, "no-pending");
+
+        yield* adapter.extensions.mcp!.authenticate!(input);
+
+        const duplicate = yield* adapter.extensions.mcp!.authenticate!(input).pipe(
+          Effect.flip,
+          Effect.orDie,
+        );
+        NodeAssert.equal(duplicate._tag, "ProviderMcpAuthError");
+        NodeAssert.equal(duplicate.reason, "duplicate-pending");
+
+        const mismatchSecret = "mismatch-secret";
+        const mismatch = yield* adapter.extensions.mcp!.relayAuthenticationCallback!({
+          ...input,
+          callbackUrl: `http://127.0.0.1:43124/callback/docs?code=${mismatchSecret}`,
+        }).pipe(Effect.flip, Effect.orDie);
+        NodeAssert.equal(mismatch._tag, "ProviderMcpAuthError");
+        NodeAssert.equal(mismatch.reason, "invalid-callback");
+        NodeAssert.doesNotMatch(mismatch.message, new RegExp(mismatchSecret));
+
+        const callbackUrl =
+          "http://127.0.0.1:43123/callback/docs?code=opaque%2Fvalue&state=one&state=two";
+        yield* adapter.extensions.mcp!.relayAuthenticationCallback!({ ...input, callbackUrl });
+        NodeAssert.deepStrictEqual(relayed, [callbackUrl]);
+
+        const runtime = runtimeFactory.lastRuntime;
+        NodeAssert.ok(runtime);
+        yield* runtime.emit({
+          id: asEventId("evt-mcp-oauth-relay-completed"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "mcpServer/oauthLogin/completed",
+          payload: { name: "docs", success: true, error: null },
+        });
+        yield* Effect.yieldNow;
+
+        const completed = yield* adapter.extensions.mcp!.relayAuthenticationCallback!({
+          ...input,
+          callbackUrl,
+        }).pipe(Effect.flip, Effect.orDie);
+        NodeAssert.equal(completed._tag, "ProviderMcpAuthError");
+        NodeAssert.equal(completed.reason, "already-completed");
+
+        const timeoutInput = {
+          ...input,
+          mcpServerId: ProviderExtensionItemId.make("timeout"),
+        };
+        yield* adapter.extensions.mcp!.authenticate!(timeoutInput);
+        yield* runtime.emit({
+          id: asEventId("evt-mcp-oauth-timeout"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "mcpServer/oauthLogin/completed",
+          payload: { name: "timeout", success: false, error: "timed out" },
+        });
+        yield* Effect.yieldNow;
+        yield* adapter.extensions.mcp!.authenticate!(timeoutInput);
+        NodeAssert.equal(
+          runtime.beginMcpAuthImpl.mock.calls.filter(([name]) => name === "timeout").length,
+          2,
+        );
+
+        const unsafeSecret = "authorization-secret";
+        const unsafe = yield* adapter.extensions.mcp!.authenticate!({
+          ...input,
+          mcpServerId: ProviderExtensionItemId.make("unsafe"),
+        }).pipe(Effect.flip, Effect.orDie);
+        NodeAssert.equal(unsafe._tag, "ProviderMcpAuthError");
+        NodeAssert.equal(unsafe.reason, "unsafe-redirect");
+        NodeAssert.doesNotMatch(unsafe.message, new RegExp(unsafeSecret));
+      }),
+    {
+      relayMcpOAuthCallback: (callbackUrl) =>
+        Effect.sync(() => {
+          relayed.push(callbackUrl);
+        }),
+    },
+  );
+});
+
+it.effect("reaps a management-only runtime after its idle window", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const threadId = asThreadId("thread-management-idle");
+
+  return withExtensionsTestAdapter(
+    runtimeFactory,
+    (adapter) =>
+      Effect.gen(function* () {
+        yield* adapter.extensions.skills!.inventory({
+          threadId,
+          cwd: "/workspace/management-idle",
+        });
+        const runtime = runtimeFactory.lastRuntime;
+        NodeAssert.ok(runtime);
+        NodeAssert.equal(runtime.closeImpl.mock.calls.length, 0);
+
+        yield* TestClock.adjust("11 millis");
+        yield* Effect.yieldNow;
+
+        NodeAssert.equal(runtime.closeImpl.mock.calls.length, 1);
+        NodeAssert.equal(yield* adapter.hasSession(threadId), false);
+      }),
+    { managementIdleTimeoutMs: 10 },
+  );
+});
+
+it.effect("does not let project discovery replace a worktree first-turn session", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const threadId = asThreadId("thread-prepared-worktree");
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      yield* adapter.extensions.skills!.inventory({
+        threadId,
+        cwd: "/workspace/project",
+      });
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        cwd: "/workspace/project/.t3/worktrees/new-thread",
+        runtimeMode: "full-access",
+      });
+
+      const preparedRuntime = runtimeFactory.runtimes[0]!;
+      const firstTurnRuntime = runtimeFactory.runtimes[1]!;
+      NodeAssert.equal(preparedRuntime.closeImpl.mock.calls.length, 1);
+      yield* adapter.extensions.skills!.inventory({
+        threadId,
+        cwd: "/workspace/project",
+      });
+
+      NodeAssert.equal(runtimeFactory.runtimes.length, 2);
+      NodeAssert.equal(firstTurnRuntime.closeImpl.mock.calls.length, 0);
+      NodeAssert.equal(yield* adapter.hasSession(threadId), true);
+      yield* adapter.sendTurn({ threadId, input: "first turn" });
+      NodeAssert.equal(firstTurnRuntime.sendTurnImpl.mock.calls.length, 1);
+    }),
+  );
+});
+
+it.effect("records overrides without starting a runtime when no session is active", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const result = yield* adapter.extensions.reconcileOverrides!({
+        threadId: asThreadId("thread-stopped"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        skillOverrides: {},
+        mcpOverrides: { [ProviderExtensionItemId.make("postgres")]: "disabled" },
+        extensionOverridesRevision: 3,
+      });
+
+      NodeAssert.equal(runtimeFactory.runtimes.length, 0);
+      NodeAssert.equal(result.state.appliedOverrideRevision, 3);
+      NodeAssert.equal(result.session, undefined);
+    }),
+  );
+});
+
+it.effect("keeps sibling override state isolated while restart-resuming one idle thread", () => {
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtime.startImpl.mockImplementation((input) =>
+      Promise.resolve({
+        provider: ProviderDriverKind.make("codex"),
+        status: "ready",
+        runtimeMode: input?.runtimeMode ?? runtime.options.runtimeMode,
+        threadId: runtime.options.threadId,
+        cwd: input?.cwd ?? runtime.options.cwd,
+        resumeCursor: {
+          threadId: `provider-${runtime.options.threadId}`,
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+  });
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const skillId = ProviderExtensionItemId.make("/workspace/.agents/skills/review/SKILL.md");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-a"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        extensionOverrides: {
+          skills: { [skillId]: "disabled" },
+          mcp: { [ProviderExtensionItemId.make("postgres")]: "disabled" },
+          revision: 1,
+        },
+      });
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-b"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        extensionOverrides: {
+          skills: { [skillId]: "enabled" },
+          mcp: { [ProviderExtensionItemId.make("postgres")]: "enabled" },
+          revision: 1,
+        },
+      });
+
+      const originalA = runtimeFactory.runtimes[0]!;
+      const siblingB = runtimeFactory.runtimes[1]!;
+      const result = yield* adapter.extensions.reconcileOverrides!({
+        threadId: asThreadId("thread-a"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        skillOverrides: { [skillId]: "enabled" },
+        mcpOverrides: { [ProviderExtensionItemId.make("postgres")]: "enabled" },
+        extensionOverridesRevision: 2,
+      });
+
+      NodeAssert.equal(runtimeFactory.runtimes.length, 3);
+      NodeAssert.equal(originalA.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(siblingB.closeImpl.mock.calls.length, 0);
+      NodeAssert.deepStrictEqual(runtimeFactory.runtimes[2]!.options.resumeCursor, {
+        threadId: "provider-thread-a",
+      });
+      NodeAssert.deepStrictEqual(runtimeFactory.runtimes[2]!.options.config, {
+        skills: { config: [{ path: skillId, enabled: true }] },
+        mcp_servers: { postgres: { enabled: true } },
+      });
+      NodeAssert.equal(result.state.appliedOverrideRevision, 2);
+      NodeAssert.equal(
+        (yield* adapter.extensions.reconciliationState!(asThreadId("thread-b")))
+          .appliedOverrideRevision,
+        1,
+      );
+    }),
+  );
+});
+
+it.effect("retains pending desired state and a retryable error when reconciliation fails", () => {
+  let runtimeIndex = 0;
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtimeIndex += 1;
+    runtime.startImpl.mockImplementation((input) =>
+      Promise.resolve({
+        provider: ProviderDriverKind.make("codex"),
+        status: "ready",
+        runtimeMode: input?.runtimeMode ?? runtime.options.runtimeMode,
+        threadId: runtime.options.threadId,
+        cwd: input?.cwd ?? runtime.options.cwd,
+        resumeCursor: { threadId: "provider-thread-failure" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    if (runtimeIndex === 2) {
+      runtime.listMcpServerStatusImpl.mockRejectedValue(new Error("confirmation failed"));
+    }
+  });
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-failure"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        extensionOverrides: { skills: {}, mcp: {}, revision: 1 },
+      });
+      const result = yield* adapter.extensions.reconcileOverrides!({
+        threadId: asThreadId("thread-failure"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        skillOverrides: {},
+        mcpOverrides: { [ProviderExtensionItemId.make("postgres")]: "disabled" },
+        extensionOverridesRevision: 2,
+      }).pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Failure");
+      const state = yield* adapter.extensions.reconciliationState!(asThreadId("thread-failure"));
+      NodeAssert.equal(state.appliedOverrideRevision, 1);
+      NodeAssert.equal(state.pendingOverrideRevision, 2);
+      NodeAssert.equal(state.error?.retryable, true);
+      NodeAssert.match(state.error?.message ?? "", /confirmation failed/);
+    }),
+  );
+});
+
+it.effect("dispatches exact selected skills and rejects stale or disabled selections", () => {
+  const skillPath = "/workspace/.agents/skills/review/SKILL.md";
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtime.listSkillsImpl.mockImplementation((input) =>
+      Promise.resolve({
+        data: [
+          {
+            cwd: input.cwd,
+            errors: [],
+            skills: [
+              {
+                name: "review",
+                path: skillPath,
+                enabled: true,
+                description: "Review changes",
+                scope: "repo",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+  });
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const skillId = ProviderExtensionItemId.make(skillPath);
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-skills"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        extensionOverrides: { skills: {}, mcp: {}, revision: 0 },
+      });
+      const runtime = runtimeFactory.lastRuntime!;
+      yield* adapter.sendTurn({
+        threadId: asThreadId("thread-skills"),
+        input: "Review this",
+        selectedSkills: [{ id: skillId, name: "review", path: skillPath }],
+      });
+      NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0]?.selectedSkills, [
+        { name: "review", path: skillPath },
+      ]);
+
+      yield* adapter.extensions.reconcileOverrides!({
+        threadId: asThreadId("thread-skills"),
+        cwd: "/workspace",
+        runtimeMode: "full-access",
+        skillOverrides: { [skillId]: "disabled" },
+        mcpOverrides: {},
+        extensionOverridesRevision: 1,
+        defer: true,
+      });
+      const disabled = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("thread-skills"),
+          input: "Review again",
+          selectedSkills: [{ id: skillId, name: "review", path: skillPath }],
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(disabled._tag, "Failure");
+      NodeAssert.ok(
+        disabled._tag === "Failure" && isProviderAdapterStaleSkillSelectionError(disabled.failure),
+      );
+      if (
+        disabled._tag === "Failure" &&
+        disabled.failure._tag === "ProviderAdapterStaleSkillSelectionError"
+      ) {
+        NodeAssert.equal(disabled.failure.reason, "disabled");
+      }
+
+      const stale = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("thread-skills"),
+          input: "Wrong identity",
+          selectedSkills: [
+            {
+              id: ProviderExtensionItemId.make("/other/review/SKILL.md"),
+              name: "review",
+              path: "/other/review/SKILL.md",
+            },
+          ],
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(stale._tag, "Failure");
+      if (
+        stale._tag === "Failure" &&
+        stale.failure._tag === "ProviderAdapterStaleSkillSelectionError"
+      ) {
+        NodeAssert.equal(stale.failure.reason, "missing");
+      }
+    }),
+  );
+});
+
+it.effect("returns cwd-specific and global skills without collapsing duplicate names", () => {
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtime.listSkillsImpl.mockImplementation((input) =>
+      Promise.resolve({
+        data: [
+          {
+            cwd: input.cwd,
+            errors: [],
+            skills: [
+              {
+                name: "shared-name",
+                path: `${input.cwd}/.agents/skills/shared-name/SKILL.md`,
+                enabled: true,
+                description: `Skill for ${input.cwd}`,
+                scope: "repo" as const,
+              },
+              {
+                name: "shared-name",
+                path: "/home/test/.codex/skills/shared-name/SKILL.md",
+                enabled: true,
+                description: "Global skill",
+                scope: "user" as const,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+  });
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const repoA = yield* adapter.extensions.skills!.inventory({
+        threadId: asThreadId("thread-repo-a"),
+        cwd: "/workspace/repo-a",
+      });
+      const repoB = yield* adapter.extensions.skills!.inventory({
+        threadId: asThreadId("thread-repo-b"),
+        cwd: "/workspace/repo-b",
+      });
+
+      NodeAssert.deepStrictEqual(
+        repoA.items.map((skill) => [skill.name, skill.path, skill.scope]),
+        [
+          ["shared-name", "/workspace/repo-a/.agents/skills/shared-name/SKILL.md", "project"],
+          ["shared-name", "/home/test/.codex/skills/shared-name/SKILL.md", "user"],
+        ],
+      );
+      NodeAssert.deepStrictEqual(
+        repoB.items.map((skill) => skill.path),
+        [
+          "/workspace/repo-b/.agents/skills/shared-name/SKILL.md",
+          "/home/test/.codex/skills/shared-name/SKILL.md",
+        ],
+      );
+      NodeAssert.equal(new Set(repoA.items.map((skill) => skill.id)).size, 2);
+      NodeAssert.equal(runtimeFactory.factory.mock.calls.length, 2);
+      NodeAssert.deepStrictEqual(CODEX_EXTENSION_CAPABILITIES.skills, {
+        inventory: true,
+        refresh: true,
+        threadOverride: true,
+      });
+    }),
+  );
+});
+
+it.effect("reuses a lazily initialized management runtime for the first turn", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const threadId = asThreadId("thread-lazy-management");
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      yield* adapter.extensions.skills!.inventory({
+        threadId,
+        cwd: "/workspace/lazy",
+      });
+      NodeAssert.equal(yield* adapter.hasSession(threadId), false);
+      NodeAssert.equal(runtimeFactory.factory.mock.calls.length, 1);
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        cwd: "/workspace/lazy",
+        runtimeMode: "auto-accept-edits",
+      });
+
+      NodeAssert.equal(runtimeFactory.factory.mock.calls.length, 1);
+      NodeAssert.equal(runtimeFactory.lastRuntime?.startImpl.mock.calls.length, 1);
+      NodeAssert.deepStrictEqual(runtimeFactory.lastRuntime?.startImpl.mock.calls[0]?.[0], {
+        cwd: "/workspace/lazy",
+        runtimeMode: "auto-accept-edits",
+      });
+      NodeAssert.equal(yield* adapter.hasSession(threadId), true);
+    }),
+  );
+});
+
+it.effect("restarts a prepared runtime when managed MCP credentials appear", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const threadId = asThreadId("thread-lazy-managed-mcp");
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      yield* adapter.extensions.skills!.inventory({ threadId, cwd: "/workspace/lazy-mcp" });
+      const preparedRuntime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(preparedRuntime);
+
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-managed-mcp"),
+        threadId,
+        providerSessionId: "managed-session",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        endpoint: "http://127.0.0.1:4123/mcp",
+        authorizationHeader: "Bearer managed-token",
+      });
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        cwd: "/workspace/lazy-mcp",
+        runtimeMode: "auto-accept-edits",
+      });
+
+      NodeAssert.equal(runtimeFactory.factory.mock.calls.length, 2);
+      NodeAssert.equal(preparedRuntime.closeImpl.mock.calls.length, 1);
+      NodeAssert.deepStrictEqual(runtimeFactory.lastRuntime?.options.appServerArgs, [
+        "-c",
+        "mcp_servers.t3-code.url=http://127.0.0.1:4123/mcp",
+        "-c",
+        'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+      ]);
+      NodeAssert.equal(
+        runtimeFactory.lastRuntime?.options.environment?.T3_MCP_BEARER_TOKEN,
+        "managed-token",
+      );
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+    ),
+  );
+});
+
+it.effect("caches skills by cwd, bypasses caches on force reload, and refreshes on change", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const threadId = asThreadId("thread-skill-cache");
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const input = { threadId, cwd: "/workspace/cache" } as const;
+      yield* adapter.extensions.skills!.inventory(input);
+      yield* adapter.extensions.skills!.inventory(input);
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime.listSkillsImpl.mock.calls.length, 1);
+
+      yield* adapter.extensions.skills!.inventory({ ...input, forceReload: true });
+      NodeAssert.equal(runtime.listSkillsImpl.mock.calls.length, 2);
+      NodeAssert.equal(runtime.listSkillsImpl.mock.calls[1]?.[0].forceReload, true);
+
+      const eventsFiber = yield* adapter.extensions.events.pipe(
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      yield* runtime.emit({
+        id: asEventId("evt-skills-changed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "skills/changed",
+        payload: {},
+      });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+
+      NodeAssert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["inventory.invalidated", "inventory.updated"],
+      );
+      NodeAssert.equal(runtime.listSkillsImpl.mock.calls.length, 3);
+      NodeAssert.equal(runtime.listSkillsImpl.mock.calls[2]?.[0].cwd, "/workspace/cache");
+      NodeAssert.equal(runtime.listSkillsImpl.mock.calls[2]?.[0].forceReload, true);
+    }),
+  );
+});
+
+it.effect("deduplicates concurrent skill refreshes and discards late results", () => {
+  type SkillResponse = EffectCodexSchema.V2SkillsListResponse;
+  let resolveSlow: ((response: SkillResponse) => void) | undefined;
+  let markSlowStarted: (() => void) | undefined;
+  const slowResponse = new Promise<SkillResponse>((resolve) => {
+    resolveSlow = resolve;
+  });
+  const slowStarted = new Promise<void>((resolve) => {
+    markSlowStarted = resolve;
+  });
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtime.listSkillsImpl.mockImplementationOnce(() => {
+      markSlowStarted?.();
+      return slowResponse;
+    });
+    runtime.listSkillsImpl.mockImplementationOnce((input) =>
+      Promise.resolve({
+        data: [
+          {
+            cwd: input.cwd,
+            errors: [],
+            skills: [
+              {
+                name: "new-skill",
+                path: `${input.cwd}/new/SKILL.md`,
+                enabled: true,
+                description: "New result",
+                scope: "repo" as const,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+  });
+  const threadId = asThreadId("thread-concurrent-cache");
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const input = { threadId, cwd: "/workspace/concurrent" } as const;
+      const first = yield* adapter.extensions.skills!.inventory(input).pipe(Effect.forkChild);
+      yield* Effect.promise(() => slowStarted);
+      const duplicate = yield* adapter.extensions.skills!.inventory(input).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      NodeAssert.equal(runtimeFactory.lastRuntime?.listSkillsImpl.mock.calls.length, 1);
+
+      const forced = yield* adapter.extensions.skills!.inventory({
+        ...input,
+        forceReload: true,
+      });
+      NodeAssert.equal(forced.items[0]?.name, "new-skill");
+      NodeAssert.ok(resolveSlow);
+      resolveSlow({
+        data: [
+          {
+            cwd: input.cwd,
+            errors: [],
+            skills: [
+              {
+                name: "old-skill",
+                path: `${input.cwd}/old/SKILL.md`,
+                enabled: true,
+                description: "Late old result",
+                scope: "repo",
+              },
+            ],
+          },
+        ],
+      });
+
+      const [firstResult, duplicateResult] = yield* Effect.all(
+        [Fiber.join(first), Fiber.join(duplicate)],
+        { concurrency: "unbounded" },
+      );
+      NodeAssert.equal(firstResult.items[0]?.name, "new-skill");
+      NodeAssert.equal(duplicateResult.items[0]?.name, "new-skill");
+      NodeAssert.equal(firstResult.revision, forced.revision);
+      NodeAssert.equal(runtimeFactory.lastRuntime?.listSkillsImpl.mock.calls.length, 2);
+    }),
+  );
+});
+
+it("merges layered MCP definitions and locks the injected T3 server", () => {
+  const userLayer = {
+    name: { type: "user" as const, file: "/home/test/.codex/config.toml" },
+    version: "1",
+    config: {
+      mcp_servers: {
+        shared: { enabled: true, command: "user-server" },
+      },
+    },
+  };
+  const projectLayer = {
+    name: { type: "project" as const, dotCodexFolder: "/workspace/repo/.codex" },
+    version: "2",
+    config: {
+      mcp_servers: {
+        shared: { enabled: false, command: "project-server" },
+      },
+    },
+  };
+  const definitions = parseCodexMcpDefinitions(
+    {
+      config: {
+        mcp_servers: {
+          shared: { enabled: false, command: "project-server" },
+        },
+      },
+      layers: [userLayer, projectLayer],
+      origins: {
+        "mcp_servers.shared": {
+          name: projectLayer.name,
+          version: projectLayer.version,
+        },
+      },
+    },
+    new Set(["t3-code"]),
+  );
+
+  NodeAssert.deepStrictEqual(
+    definitions.map((definition) => ({
+      name: definition.name,
+      providerEnabled: definition.providerEnabled,
+      managed: definition.managed,
+      toggleable: definition.toggleable,
+      origins: definition.origins.map((origin) => [origin.scope, origin.effective]),
+    })),
+    [
+      {
+        name: "shared",
+        providerEnabled: false,
+        managed: false,
+        toggleable: true,
+        origins: [
+          ["user", false],
+          ["project", true],
+        ],
+      },
+      {
+        name: "t3-code",
+        providerEnabled: true,
+        managed: true,
+        toggleable: false,
+        origins: [["unknown", true]],
+      },
+    ],
+  );
+});
+
+it("uses Codex layer precedence when an MCP definition has no aggregate origin", () => {
+  const projectLayer = {
+    name: { type: "project" as const, dotCodexFolder: "/workspace/repo/.codex" },
+    version: "project-version",
+    config: { mcp_servers: { shared: { command: "project-server" } } },
+  };
+  const userLayer = {
+    name: { type: "user" as const, file: "/home/test/.codex/config.toml" },
+    version: "user-version",
+    config: { mcp_servers: { shared: { command: "user-server" } } },
+  };
+  const [definition] = parseCodexMcpDefinitions({
+    config: { mcp_servers: { shared: { command: "project-server" } } },
+    layers: [projectLayer, userLayer],
+    origins: {
+      "mcp_servers.shared.command": {
+        name: projectLayer.name,
+        version: projectLayer.version,
+      },
+    },
+  });
+
+  NodeAssert.deepStrictEqual(
+    definition?.origins.map((origin) => [origin.scope, origin.effective]),
+    [
+      ["project", true],
+      ["user", false],
+    ],
+  );
+});
+
+it.effect("overlays MCP live status notifications without polling", () => {
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    runtime.readMcpConfigImpl.mockImplementation(() =>
+      Promise.resolve({
+        config: { mcp_servers: { docs: { enabled: true } } },
+        origins: {},
+        layers: [],
+      }),
+    );
+    runtime.listMcpServerStatusImpl.mockImplementation(() =>
+      Promise.resolve({
+        data: [
+          {
+            name: "docs",
+            authStatus: "notLoggedIn" as const,
+            serverInfo: null,
+            tools: {},
+            resources: [],
+            resourceTemplates: [],
+          },
+        ],
+        nextCursor: null,
+      }),
+    );
+  });
+  const threadId = asThreadId("thread-mcp-status");
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const input = { threadId, cwd: "/workspace/mcp" } as const;
+      const initial = yield* adapter.extensions.mcp!.inventory(input);
+      NodeAssert.deepStrictEqual(initial.items[0], {
+        id: "docs",
+        name: "docs",
+        origins: [],
+        providerEnabled: true,
+        managed: false,
+        toggleable: true,
+        startupStatus: "unknown",
+        authStatus: "needs-auth",
+        statusObserved: true,
+        toolCount: 0,
+        resourceCount: 0,
+        resourceTemplateCount: 0,
+      });
+
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-draft-failed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "mcpServer/startupStatus/updated",
+        payload: {
+          name: "docs",
+          status: "failed",
+          error: "global pre-thread status is not attributable",
+          failureReason: null,
+        },
+      });
+      yield* Effect.yieldNow;
+      const unmeasuredDraft = yield* adapter.extensions.mcp!.inventory(input);
+      NodeAssert.equal(unmeasuredDraft.items[0]?.startupStatus, "unknown");
+      NodeAssert.equal(unmeasuredDraft.items[0]?.error, undefined);
+
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-ready"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "mcpServer/startupStatus/updated",
+        payload: {
+          name: "docs",
+          status: "ready",
+          error: null,
+          failureReason: null,
+        },
+      });
+      yield* Effect.yieldNow;
+      const updated = yield* adapter.extensions.mcp!.inventory(input);
+
+      NodeAssert.equal(updated.items[0]?.startupStatus, "ready");
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-authenticated"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "mcpServer/oauthLogin/completed",
+        payload: {
+          name: "docs",
+          success: true,
+          error: null,
+        },
+      });
+      yield* Effect.yieldNow;
+      const authenticated = yield* adapter.extensions.mcp!.inventory(input);
+      NodeAssert.equal(authenticated.items[0]?.authStatus, "authenticated");
+      NodeAssert.ok(authenticated.revision > initial.revision);
+      NodeAssert.equal(runtime.listMcpServerStatusImpl.mock.calls.length, 1);
+
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-auth-failed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "mcpServer/oauthLogin/completed",
+        payload: {
+          name: "docs",
+          success: false,
+          error: null,
+        },
+      });
+      yield* Effect.yieldNow;
+      const authFailed = yield* adapter.extensions.mcp!.inventory(input);
+      NodeAssert.equal(authFailed.items[0]?.authStatus, "needs-auth");
+      NodeAssert.equal(authFailed.items[0]?.error, "Authentication did not complete.");
+      NodeAssert.deepStrictEqual(CODEX_EXTENSION_CAPABILITIES.mcp, {
+        inventory: true,
+        liveStatus: true,
+        threadOverride: true,
+        reconnect: false,
+        authenticate: true,
+      });
     }),
   );
 });

@@ -18,9 +18,15 @@ import {
   buildTurnStartParams,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
+  MCP_OAUTH_TIMEOUT_SECS,
   openCodexThread,
+  requestAllCodexMcpServerStatus,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+it("allows ten minutes for a manual MCP OAuth round trip", () => {
+  NodeAssert.equal(MCP_OAUTH_TIMEOUT_SECS, 600);
+});
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
   it("retains identifier purpose and the random source failure", () => {
@@ -244,6 +250,31 @@ describe("buildTurnStartParams", () => {
       ],
     });
   });
+
+  it.effect("encodes selected skills as structured app-server input", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "Review this",
+        selectedSkills: [
+          {
+            name: "review",
+            path: "/workspace/.agents/skills/review/SKILL.md",
+          },
+        ],
+      });
+
+      NodeAssert.deepStrictEqual(params.input, [
+        { type: "text", text: "Review this" },
+        {
+          type: "skill",
+          name: "review",
+          path: "/workspace/.agents/skills/review/SKILL.md",
+        },
+      ]);
+    }),
+  );
 });
 
 describe("buildCodexDeveloperInstructions", () => {
@@ -393,6 +424,58 @@ describe("isRecoverableThreadResumeError", () => {
 });
 
 describe("openCodexThread", () => {
+  it.effect("passes extension config to both thread start and resume", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const client = {
+        request: <M extends "thread/start" | "thread/resume">(
+          method: M,
+          payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          calls.push({ method, payload });
+          return Effect.succeed(
+            makeThreadOpenResponse(method === "thread/start" ? "new-thread" : "resumed-thread"),
+          ) as Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M]>;
+        },
+      };
+      const config = {
+        skills: {
+          config: [{ path: "/skills/review/SKILL.md", enabled: false }],
+        },
+        mcp_servers: { postgres: { enabled: true } },
+      };
+
+      yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-start"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        config,
+      });
+      yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-resume"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "persisted-thread",
+        config,
+      });
+
+      NodeAssert.deepStrictEqual(
+        calls.map((call) => [call.method, (call.payload as { config?: unknown }).config]),
+        [
+          ["thread/start", config],
+          ["thread/resume", config],
+        ],
+      );
+    }),
+  );
+
   it.effect("falls back to thread/start when resume fails recoverably", () =>
     Effect.gen(function* () {
       const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
@@ -466,6 +549,61 @@ describe("openCodexThread", () => {
 
       NodeAssert.ok(isCodexAppServerRequestError(error));
       NodeAssert.equal(error.errorMessage, "timed out waiting for server");
+    }),
+  );
+});
+
+describe("requestAllCodexMcpServerStatus", () => {
+  it.effect("always scopes status pages to the provider thread", () =>
+    Effect.gen(function* () {
+      const calls: Array<CodexRpc.ClientRequestParamsByMethod["mcpServerStatus/list"]> = [];
+      const client = {
+        request: (
+          _method: "mcpServerStatus/list",
+          payload: CodexRpc.ClientRequestParamsByMethod["mcpServerStatus/list"],
+        ) => {
+          calls.push(payload);
+          return Effect.succeed({
+            data: [],
+            nextCursor: calls.length === 1 ? "page-2" : null,
+          });
+        },
+      };
+
+      yield* requestAllCodexMcpServerStatus({
+        client,
+        providerThreadId: "provider-thread-1",
+      });
+
+      NodeAssert.deepStrictEqual(calls, [
+        {
+          threadId: "provider-thread-1",
+          detail: "toolsAndAuthOnly",
+        },
+        {
+          threadId: "provider-thread-1",
+          detail: "toolsAndAuthOnly",
+          cursor: "page-2",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("uses process-global status before a thread is open", () =>
+    Effect.gen(function* () {
+      let requested = false;
+      const result = yield* requestAllCodexMcpServerStatus({
+        client: {
+          request: () => {
+            requested = true;
+            return Effect.succeed({ data: [], nextCursor: null });
+          },
+        },
+        providerThreadId: undefined,
+      });
+
+      NodeAssert.equal(requested, true);
+      NodeAssert.deepStrictEqual(result, { data: [], nextCursor: null });
     }),
   );
 });

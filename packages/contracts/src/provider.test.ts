@@ -112,9 +112,51 @@ describe("ProviderSessionStartInput", () => {
     expect(parsed.providerInstanceId).toBe("ollama_local");
     expect(parsed.modelSelection?.instanceId).toBe("ollama_local");
   });
+
+  it("preserves provider-neutral extension overrides for session start", () => {
+    const parsed = decodeProviderSessionStartInput({
+      threadId: "thread-1",
+      provider: "codex",
+      providerInstanceId: "codex",
+      cwd: "/tmp/workspace",
+      runtimeMode: "full-access",
+      extensionOverrides: {
+        skills: { "/tmp/skills/review/SKILL.md": "disabled" },
+        mcp: { postgres: "enabled" },
+        revision: 2,
+      },
+    });
+
+    expect(parsed.extensionOverrides).toEqual({
+      skills: { "/tmp/skills/review/SKILL.md": "disabled" },
+      mcp: { postgres: "enabled" },
+      revision: 2,
+    });
+  });
 });
 
 describe("ProviderSendTurnInput", () => {
+  it("preserves selected skill identity and path", () => {
+    const parsed = decodeProviderSendTurnInput({
+      threadId: "thread-1",
+      selectedSkills: [
+        {
+          id: "/tmp/skills/review/SKILL.md",
+          name: "review",
+          path: "/tmp/skills/review/SKILL.md",
+        },
+      ],
+    });
+
+    expect(parsed.selectedSkills).toEqual([
+      {
+        id: "/tmp/skills/review/SKILL.md",
+        name: "review",
+        path: "/tmp/skills/review/SKILL.md",
+      },
+    ]);
+  });
+
   it("accepts codex modelSelection", () => {
     const parsed = decodeProviderSendTurnInput({
       threadId: "thread-1",

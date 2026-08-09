@@ -1,14 +1,14 @@
 import {
   type ProjectEntry,
+  type ProviderSkill,
   type ProviderDriverKind,
-  type ServerProviderSkill,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import { BotIcon } from "lucide-react";
 import { memo, useLayoutEffect, useMemo, useRef } from "react";
 
 import { type ComposerSlashCommand, type ComposerTriggerKind } from "../../composer-logic";
-import { formatProviderSkillInstallSource } from "~/providerSkillPresentation";
+import { contextualSkillSourceLabel } from "~/composer-logic";
 import { cn } from "~/lib/utils";
 import {
   Command,
@@ -48,7 +48,7 @@ export type ComposerCommandItem =
       id: string;
       type: "skill";
       provider: ProviderDriverKind;
-      skill: ServerProviderSkill;
+      skill: ProviderSkill;
       label: string;
       description: string;
     };
@@ -207,7 +207,9 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
   onSelect: (item: ComposerCommandItem) => void;
 }) {
   const skillSourceLabel =
-    props.item.type === "skill" ? formatProviderSkillInstallSource(props.item.skill) : null;
+    props.item.type === "skill" ? contextualSkillSourceLabel(props.item.skill) : null;
+  const trailingSkillSourceLabel =
+    skillSourceLabel && !props.item.label.endsWith(skillSourceLabel) ? skillSourceLabel : null;
 
   return (
     <CommandItem
@@ -253,8 +255,10 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
           {props.item.description}
         </span>
       </span>
-      {skillSourceLabel ? (
-        <span className="shrink-0 pl-2 text-secondary-label text-xs">{skillSourceLabel}</span>
+      {trailingSkillSourceLabel ? (
+        <span className="shrink-0 pl-2 text-secondary-label text-xs">
+          {trailingSkillSourceLabel}
+        </span>
       ) : null}
     </CommandItem>
   );

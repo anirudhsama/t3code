@@ -145,6 +145,8 @@ import {
 } from "../previewMiniPlayerStore";
 import { RightPanelTabs } from "./RightPanelTabs";
 import { AgentsPanel } from "./AgentsPanel";
+import { ExtensionsPanel } from "./ExtensionsPanel";
+import { isMcpAuthClientLocal } from "~/extensionsPanelLogic";
 import {
   deriveAgentPanelModel,
   foldSubagentActivities,
@@ -276,6 +278,7 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
+  buildInitialMcpOverrides,
   buildLocalDraftThread,
   buildLoadingThreadFromShell,
   buildThreadTurnInterruptInput,
@@ -311,6 +314,7 @@ import { useComposerHandleContext } from "../composerHandleContext";
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { previewEnvironment } from "../state/preview";
+import { extensionsEnvironment } from "../state/extensions";
 import { useAtomCommand } from "../state/use-atom-command";
 import { Button } from "./ui/button";
 import {
@@ -338,7 +342,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
-const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
+const EMPTY_CONTEXTUAL_SKILLS: [] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
   const transitionGroupRef = useRef<HTMLDivElement | null>(null);
@@ -1302,6 +1306,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
+  const setDraftMcpOverride = useComposerDraftStore((store) => store.setDraftMcpOverride);
   const getDraftSessionByLogicalProjectKey = useComposerDraftStore(
     (store) => store.getDraftSessionByLogicalProjectKey,
   );
@@ -1735,6 +1740,13 @@ function ChatViewContent(props: ChatViewProps) {
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
+  const isMcpAuthLocalClient =
+    activeEnvironment !== null &&
+    isMcpAuthClientLocal({
+      target: activeEnvironment.entry.target,
+      electron: isElectron,
+      hostname: typeof window === "undefined" ? "" : window.location.hostname,
+    });
   const activeReconnectingEnvironmentId =
     activeEnvironmentConnectionPhase === "connecting" ||
     activeEnvironmentConnectionPhase === "reconnecting"
@@ -2586,6 +2598,23 @@ function ChatViewContent(props: ChatViewProps) {
     const defaultInstanceId = defaultInstanceIdForDriver(selectedProvider);
     return providerStatuses.find((status) => status.instanceId === defaultInstanceId) ?? null;
   }, [activeProviderInstanceId, providerStatuses, selectedProvider]);
+  const extensionsQuery = useEnvironmentQuery(
+    activeThreadId && activeProject && activeProviderInstanceId
+      ? isServerThread
+        ? extensionsEnvironment.snapshot({
+            environmentId,
+            input: { threadId: activeThreadId },
+          })
+        : extensionsEnvironment.previewSnapshot({
+            environmentId,
+            input: {
+              threadId: activeThreadId,
+              projectId: activeProject.id,
+              providerInstanceId: activeProviderInstanceId,
+            },
+          })
+      : null,
+  );
   const providerStatusBannerKey = getProviderStatusBannerKey(activeProviderStatus);
   const [dismissedProviderStatusBannerKey, setDismissedProviderStatusBannerKey] = useState<
     string | null
@@ -3218,6 +3247,10 @@ function ChatViewContent(props: ChatViewProps) {
   const addAgentsSurface = useCallback(() => {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().open(activeThreadRef, "agents");
+  }, [activeThreadRef]);
+  const addExtensionsSurface = useCallback(() => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().open(activeThreadRef, "extensions");
   }, [activeThreadRef]);
   const openFileSurface = useCallback(
     (relativePath: string) => {
@@ -4844,7 +4877,20 @@ function ChatViewContent(props: ChatViewProps) {
       selectedProviderModels: ctxSelectedProviderModels,
       selectedPromptEffort: ctxSelectedPromptEffort,
       selectedModelSelection: ctxSelectedModelSelection,
+      selectedSkills,
+      invalidSkillNames,
     } = sendCtx;
+    if (invalidSkillNames.length > 0) {
+      const names = [...new Set(invalidSkillNames)].map((name) => `$${name}`);
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Resolve unavailable skills before sending",
+          description: `${names.join(", ")} ${names.length === 1 ? "is" : "are"} disabled, missing, or ambiguous.`,
+        }),
+      );
+      return;
+    }
     const composerImages =
       directAnnotation?.image &&
       !sendContextImages.some((image) => image.id === directAnnotation.image?.id)
@@ -5139,6 +5185,7 @@ function ChatViewContent(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      ...buildInitialMcpOverrides(localDraftThread?.mcpOverrides),
                     },
                   }
                 : {}),
@@ -5170,6 +5217,7 @@ function ChatViewContent(props: ChatViewProps) {
           titleSeed: title,
           runtimeMode,
           interactionMode,
+          ...(selectedSkills.length > 0 ? { selectedSkills } : {}),
           ...(bootstrap ? { bootstrap } : {}),
           createdAt: messageCreatedAt,
         },
@@ -5445,7 +5493,10 @@ function ChatViewContent(props: ChatViewProps) {
         selectedProviderModels: ctxSelectedProviderModels,
         selectedPromptEffort: ctxSelectedPromptEffort,
         selectedModelSelection: ctxSelectedModelSelection,
+        selectedSkills,
+        invalidSkillNames,
       } = sendCtx;
+      if (invalidSkillNames.length > 0) return;
 
       const threadIdForSend = activeThread.id;
       const messageIdForSend = newMessageId();
@@ -5524,6 +5575,7 @@ function ChatViewContent(props: ChatViewProps) {
             titleSeed: activeThread.title,
             runtimeMode,
             interactionMode: nextInteractionMode,
+            ...(selectedSkills.length > 0 ? { selectedSkills } : {}),
             ...(nextInteractionMode === "default" && activeProposedPlan
               ? {
                   sourceProposedPlan: {
@@ -5982,6 +6034,25 @@ function ChatViewContent(props: ChatViewProps) {
         environmentId={activeThreadRef?.environmentId ?? null}
         threadId={activeThreadRef?.threadId ?? null}
       />
+    ) : activeRightPanelSurface?.kind === "extensions" ? (
+      <ExtensionsPanel
+        key={`${activeThreadRef.environmentId}:${activeThreadRef.threadId}`}
+        environmentId={activeThreadRef.environmentId}
+        threadId={activeThreadRef.threadId}
+        snapshot={extensionsQuery.data}
+        loadError={extensionsQuery.error}
+        isLoading={extensionsQuery.isPending}
+        durable={isServerThread}
+        activeTurn={isWorking || !latestTurnSettled}
+        projectId={activeProject?.id ?? null}
+        providerInstanceId={activeProviderInstanceId}
+        draftMcpOverrides={localDraftThread?.mcpOverrides ?? {}}
+        isAuthClientLocal={isMcpAuthLocalClient}
+        onSetDraftMcpOverride={(mcpServerId, state) => {
+          if (!composerDraftTarget || isServerThread) return;
+          setDraftMcpOverride(composerDraftTarget, mcpServerId, state);
+        }}
+      />
     ) : (activeRightPanelSurface?.kind === "files" || activeRightPanelSurface?.kind === "file") &&
       activeProject &&
       activeWorkspaceRoot ? (
@@ -6106,7 +6177,7 @@ function ChatViewContent(props: ChatViewProps) {
                 resolvedTheme={resolvedTheme}
                 timestampFormat={timestampFormat}
                 workspaceRoot={activeWorkspaceRoot}
-                skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
+                skills={extensionsQuery.data?.skills ?? EMPTY_CONTEXTUAL_SKILLS}
                 anchorMessageId={timelineAnchorMessageId}
                 onAnchorReady={onTimelineAnchorReady}
                 contentInsetEndAdjustment={composerOverlayHeight}
@@ -6229,6 +6300,8 @@ function ChatViewContent(props: ChatViewProps) {
                             interactionMode={interactionMode}
                             lockedProvider={lockedProvider}
                             providerStatuses={providerStatuses as ServerProvider[]}
+                            extensionsSnapshot={extensionsQuery.data}
+                            extensionsLoading={extensionsQuery.isPending}
                             activeProjectDefaultModelSelection={
                               activeProject?.defaultModelSelection
                             }
@@ -6416,6 +6489,7 @@ function ChatViewContent(props: ChatViewProps) {
           onAddDiff={addDiffSurface}
           onAddFiles={addFilesSurface}
           onAddAgents={addAgentsSurface}
+          onAddExtensions={addExtensionsSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           diffAvailable={isServerThread && isGitRepo}
           filesAvailable={activeProject !== null}
@@ -6444,6 +6518,7 @@ function ChatViewContent(props: ChatViewProps) {
             onAddDiff={addDiffSurface}
             onAddFiles={addFilesSurface}
             onAddAgents={addAgentsSurface}
+            onAddExtensions={addExtensionsSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}

@@ -55,6 +55,10 @@
       "types": "./src/state/entities.ts",
       "default": "./src/state/entities.ts"
     },
+    "./state/extensions": {
+      "types": "./src/state/extensions.ts",
+      "default": "./src/state/extensions.ts"
+    },
     "./state/filesystem": {
       "types": "./src/state/filesystem.ts",
       "default": "./src/state/filesystem.ts"

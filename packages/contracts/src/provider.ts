@@ -22,6 +22,7 @@ import {
   RuntimeMode,
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
+import { ProviderSelectedSkill, ProviderThreadExtensionOverrides } from "./providerExtensions.ts";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -61,6 +62,7 @@ export const ProviderSessionStartInput = Schema.Struct({
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
   sandboxMode: Schema.optional(ProviderSandboxMode),
   runtimeMode: RuntimeMode,
+  extensionOverrides: Schema.optional(ProviderThreadExtensionOverrides),
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
@@ -74,6 +76,7 @@ export const ProviderSendTurnInput = Schema.Struct({
   ),
   modelSelection: Schema.optional(ModelSelection),
   interactionMode: Schema.optional(ProviderInteractionMode),
+  selectedSkills: Schema.optional(Schema.Array(ProviderSelectedSkill)),
 });
 export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 
