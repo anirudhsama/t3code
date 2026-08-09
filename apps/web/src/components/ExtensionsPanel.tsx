@@ -51,6 +51,7 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { ScrollArea } from "~/components/ui/scroll-area";
+import { Skeleton } from "~/components/ui/skeleton";
 import { Switch } from "~/components/ui/switch";
 
 interface ExtensionsPanelProps {
@@ -108,6 +109,24 @@ function serverInfoLabel(serverInfo: unknown): string | null {
     typeof info.title === "string" ? info.title : typeof info.name === "string" ? info.name : null;
   const version = typeof info.version === "string" ? info.version : null;
   return [name, version].filter(Boolean).join(" · ") || null;
+}
+
+function ExtensionRowsSkeleton({ label }: { label: string }) {
+  return (
+    <div
+      className="space-y-2 rounded-lg border border-border/65 bg-card/25 p-3"
+      role="status"
+      aria-label={label}
+    >
+      <p className="text-xs font-medium text-foreground/80">{label}</p>
+      {["w-2/3", "w-1/2", "w-3/5"].map((width) => (
+        <div key={width} className="space-y-2 rounded-md border border-border/50 p-2.5">
+          <Skeleton className={`h-3 ${width} rounded-full`} />
+          <Skeleton className="h-2.5 w-1/3 rounded-full" />
+        </div>
+      ))}
+    </div>
+  );
 }
 
 const SkillRow = memo(function SkillRow({ skill }: { skill: ProviderSkill }) {
@@ -294,16 +313,19 @@ export const McpRow = memo(function McpRow(props: {
           <details className="mt-2 text-[.68rem] text-muted-foreground">
             <summary className="cursor-pointer select-none hover:text-foreground">Details</summary>
             <div className="mt-1.5 space-y-1 border-l border-border pl-2">
-              <p className="font-medium text-foreground/80">Origin stack</p>
               {props.server.origins.length > 0 ? (
-                props.server.origins.map((origin, index) => (
-                  <p key={`${origin.scope}:${origin.path ?? origin.label ?? index}`}>
-                    {origin.effective ? "Effective · " : ""}
-                    {originLabel(origin)}
+                <>
+                  <p>Defined in: {props.server.origins.map(originLabel).join(", ")}</p>
+                  <p>
+                    Active:{" "}
+                    {originLabel(
+                      props.server.origins.find((origin) => origin.effective) ??
+                        props.server.origins[0]!,
+                    )}
                   </p>
-                ))
+                </>
               ) : (
-                <p>No provider origin metadata.</p>
+                <p>Definition source not reported by the provider.</p>
               )}
               {props.server.managed ? (
                 <p className="flex items-center gap-1">
@@ -741,6 +763,12 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
   ];
   const mutationDisabled = mutationRevision !== null;
   const retryable = errors.some((error) => error.retryable);
+  const initialMcpLoading =
+    (props.isLoading && !props.snapshot) ||
+    Boolean(props.snapshot?.loading.mcp && props.snapshot.refreshedAt === null);
+  const initialSkillsLoading =
+    (props.isLoading && !props.snapshot) ||
+    Boolean(props.snapshot?.loading.skills && props.snapshot.refreshedAt === null);
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-background">
       <div className="border-b border-border/70 px-4 py-3">
@@ -803,10 +831,6 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
               </div>
             </div>
           ) : null}
-          {props.isLoading && !props.snapshot ? (
-            <p className="text-xs text-muted-foreground">Discovering contextual extensions…</p>
-          ) : null}
-
           <section aria-labelledby="extensions-mcp-heading">
             <div className="mb-2 flex items-center gap-2">
               <div className="min-w-0 flex-1">
@@ -817,7 +841,9 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
                   MCP servers
                 </h3>
                 <p className="text-[.68rem] text-muted-foreground">
-                  {props.snapshot?.mcpServers.length ?? 0} configured
+                  {initialMcpLoading
+                    ? "Discovering MCP servers…"
+                    : `${props.snapshot?.mcpServers.length ?? 0} configured`}
                 </p>
               </div>
               <Button
@@ -834,7 +860,9 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
                 {refreshing.has("mcp") || props.snapshot?.loading.mcp ? "Refreshing" : "Refresh"}
               </Button>
             </div>
-            {props.snapshot && !props.snapshot.capabilities.mcp.inventory ? (
+            {initialMcpLoading ? (
+              <ExtensionRowsSkeleton label="Discovering MCP servers…" />
+            ) : props.snapshot && !props.snapshot.capabilities.mcp.inventory ? (
               <div className="rounded-lg border border-border/65 p-3 text-xs text-muted-foreground">
                 {props.snapshot.provider} does not expose MCP inventory or thread-local enablement
                 yet.
@@ -906,13 +934,17 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
                   Skills
                 </h3>
                 <p className="text-[.68rem] text-muted-foreground">
-                  {props.snapshot?.skills.length ?? 0} discovered · inventory only
+                  {initialSkillsLoading
+                    ? "Discovering skills…"
+                    : `${props.snapshot?.skills.length ?? 0} discovered`}
                 </p>
               </div>
             </button>
             {!skillsCollapsed ? (
               <div id="extensions-skills-content" className="mt-2">
-                {props.snapshot && !props.snapshot.capabilities.skills.inventory ? (
+                {initialSkillsLoading ? (
+                  <ExtensionRowsSkeleton label="Discovering skills…" />
+                ) : props.snapshot && !props.snapshot.capabilities.skills.inventory ? (
                   <div className="rounded-lg border border-border/65 p-3 text-xs text-muted-foreground">
                     {props.snapshot.provider} does not expose contextual skill inventory yet.
                   </div>

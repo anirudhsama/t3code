@@ -351,7 +351,10 @@ export function parseCodexMcpDefinitions(
     const contributingLayers = layers.filter((layer) =>
       Object.hasOwn(readMcpServers(layer.config), name),
     );
-    const fallbackWinner = contributingLayers.at(-1);
+    // config/read returns layers from highest to lowest precedence. Older versions do not
+    // always report an aggregate origin for MCP definitions, so the first contributor is
+    // the effective definition in that case.
+    const fallbackWinner = contributingLayers.at(0);
     const origins = contributingLayers.map((layer) =>
       codexConfigLayerOrigin(
         layer.name,

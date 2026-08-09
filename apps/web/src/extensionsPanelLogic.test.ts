@@ -17,6 +17,8 @@ import {
   filterExtensionSkills,
   mcpStatusLabel,
   isMcpAuthClientLocal,
+  sortExtensionMcpServers,
+  sortExtensionSkills,
 } from "./extensionsPanelLogic";
 
 function snapshot(): ThreadExtensionsSnapshot {
@@ -83,6 +85,46 @@ describe("extensions panel logic", () => {
   it("finds managed MCP rows by provenance without hiding them", () => {
     const value = snapshot();
     expect(filterExtensionMcpServers(value.mcpServers, "runtime")).toEqual(value.mcpServers);
+  });
+
+  it("sorts extension inventory by provenance and stable names", () => {
+    const value = snapshot();
+    const server = value.mcpServers[0]!;
+    const skill = value.skills[0]!;
+    expect(
+      sortExtensionMcpServers([
+        {
+          ...server,
+          id: ProviderExtensionItemId.make("runtime"),
+          name: "runtime",
+          origins: [{ scope: "system", label: "Runtime", effective: true }],
+        },
+        {
+          ...server,
+          id: ProviderExtensionItemId.make("user"),
+          name: "user",
+          origins: [{ scope: "user", label: "User", effective: true }],
+        },
+        {
+          ...server,
+          id: ProviderExtensionItemId.make("project-z"),
+          name: "zeta",
+          origins: [{ scope: "project", label: "Project", effective: true }],
+        },
+        {
+          ...server,
+          id: ProviderExtensionItemId.make("project-a"),
+          name: "Alpha",
+          origins: [{ scope: "project", label: "Project", effective: true }],
+        },
+      ]).map((item) => item.id),
+    ).toEqual(["project-a", "project-z", "user", "runtime"]);
+    expect(
+      sortExtensionSkills([
+        { ...skill, id: ProviderExtensionItemId.make("zeta"), name: "zeta" },
+        { ...skill, id: ProviderExtensionItemId.make("alpha"), name: "Alpha" },
+      ]).map((item) => item.id),
+    ).toEqual(["alpha", "zeta"]);
   });
 
   it("derives pending and a semantics-preserving retry target from revisions", () => {

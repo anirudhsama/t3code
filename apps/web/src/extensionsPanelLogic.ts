@@ -1,4 +1,5 @@
 import type {
+  ProviderExtensionScope,
   ProviderMcpOverrides,
   ProviderExtensionOverrideState,
   ProviderMcpServer,
@@ -137,35 +138,80 @@ export const SKILL_GROUPS = [
   { id: "other", label: "Plugins & other", scopes: ["plugin", "unknown"] },
 ] as const;
 
+const PROVENANCE_ORDER: Readonly<Record<ProviderExtensionScope, number>> = {
+  project: 0,
+  user: 1,
+  plugin: 2,
+  admin: 2,
+  system: 2,
+  unknown: 2,
+};
+
+function compareNames(left: string, right: string): number {
+  const normalizedLeft = left.toLowerCase();
+  const normalizedRight = right.toLowerCase();
+  if (normalizedLeft < normalizedRight) return -1;
+  if (normalizedLeft > normalizedRight) return 1;
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+export function sortExtensionSkills(
+  skills: readonly ProviderSkill[],
+): ReadonlyArray<ProviderSkill> {
+  return [...skills].sort((left, right) => {
+    const provenance = PROVENANCE_ORDER[left.scope] - PROVENANCE_ORDER[right.scope];
+    return provenance || compareNames(left.name, right.name) || compareNames(left.id, right.id);
+  });
+}
+
+export function sortExtensionMcpServers(
+  servers: readonly ProviderMcpServer[],
+): ReadonlyArray<ProviderMcpServer> {
+  const scope = (server: ProviderMcpServer): ProviderExtensionScope =>
+    server.origins.find((origin) => origin.effective)?.scope ??
+    server.origins[0]?.scope ??
+    "unknown";
+  return [...servers].sort((left, right) => {
+    const provenance = PROVENANCE_ORDER[scope(left)] - PROVENANCE_ORDER[scope(right)];
+    return provenance || compareNames(left.name, right.name) || compareNames(left.id, right.id);
+  });
+}
+
 export function filterExtensionSkills(skills: readonly ProviderSkill[], query: string) {
   const normalized = query.trim().toLowerCase();
-  if (!normalized) return skills;
-  return skills.filter((skill) =>
-    [
-      skill.name,
-      skill.displayName,
-      skill.description,
-      skill.scope,
-      skill.path,
-      skill.origin?.label,
-      skill.origin?.path,
-    ].some((value) => value?.toLowerCase().includes(normalized)),
-  );
+  const filtered = normalized
+    ? skills.filter((skill) =>
+        [
+          skill.name,
+          skill.displayName,
+          skill.description,
+          skill.scope,
+          skill.path,
+          skill.origin?.label,
+          skill.origin?.path,
+        ].some((value) => value?.toLowerCase().includes(normalized)),
+      )
+    : skills;
+  return sortExtensionSkills(filtered);
 }
 
 export function filterExtensionMcpServers(servers: readonly ProviderMcpServer[], query: string) {
   const normalized = query.trim().toLowerCase();
-  if (!normalized) return servers;
-  return servers.filter((server) =>
-    [
-      server.name,
-      server.id,
-      server.error,
-      ...server.origins.flatMap((origin) => [origin.label, origin.path]),
-    ]
-      .filter((value): value is string => Boolean(value))
-      .some((value) => value.toLowerCase().includes(normalized)),
-  );
+  const filtered = normalized
+    ? servers.filter((server) =>
+        [
+          server.name,
+          server.id,
+          server.error,
+          ...server.origins.flatMap((origin) => [origin.label, origin.path]),
+        ]
+          .filter((value): value is string => Boolean(value))
+          .some((value) => value.toLowerCase().includes(normalized)),
+      )
+    : servers;
+  return sortExtensionMcpServers(filtered);
 }
 
 export type ExtensionRetryTarget = {

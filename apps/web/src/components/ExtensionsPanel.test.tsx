@@ -73,8 +73,13 @@ function snapshot(): ThreadExtensionsSnapshot {
 }
 
 function render(
-  snapshotValue: ThreadExtensionsSnapshot,
-  options?: { activeTurn?: boolean; durable?: boolean; skillsCollapsed?: boolean },
+  snapshotValue: ThreadExtensionsSnapshot | null,
+  options?: {
+    activeTurn?: boolean;
+    durable?: boolean;
+    isLoading?: boolean;
+    skillsCollapsed?: boolean;
+  },
 ): string {
   const ref = scopeThreadRef(environmentId, threadId);
   useRightPanelStore.setState({
@@ -93,7 +98,7 @@ function render(
       threadId={threadId}
       snapshot={snapshotValue}
       loadError={null}
-      isLoading={false}
+      isLoading={options?.isLoading ?? false}
       projectId={null}
       providerInstanceId={null}
       durable={options?.durable ?? true}
@@ -129,6 +134,104 @@ describe("ExtensionsPanel", () => {
     expect(markup).toContain("Review this repository");
     expect(markup).not.toContain("Disable review for this thread");
     expect(markup).not.toContain("Provider default:");
+  });
+
+  it("renders prominent per-section skeletons during the first discovery", () => {
+    const markup = render(null, { isLoading: true, skillsCollapsed: false });
+
+    expect(markup).toContain('aria-label="Discovering MCP servers…"');
+    expect(markup).toContain('aria-label="Discovering skills…"');
+    expect(markup).toContain('data-slot="skeleton"');
+    expect(markup).not.toContain("0 configured");
+    expect(markup).not.toContain("0 discovered");
+    expect(markup).not.toContain("No matching MCP servers");
+  });
+
+  it("retains measured rows while refreshing in place", () => {
+    const value = snapshot();
+    const markup = render(
+      { ...value, loading: { skills: true, mcp: true } },
+      { isLoading: true, skillsCollapsed: false },
+    );
+
+    expect(markup).toContain("1 configured");
+    expect(markup).toContain("1 discovered");
+    expect(markup).toContain("t3-code");
+    expect(markup).toContain("Review this repository");
+    expect(markup).not.toContain('aria-label="Discovering MCP servers…"');
+  });
+
+  it("sorts MCP provenance groups and skill rows deterministically", () => {
+    const value = snapshot();
+    const mcpServer = value.mcpServers[0]!;
+    const skill = value.skills[0]!;
+    const markup = render(
+      {
+        ...value,
+        mcpServers: [
+          {
+            ...mcpServer,
+            id: ProviderExtensionItemId.make("runtime-zeta"),
+            name: "zeta-runtime",
+            origins: [{ scope: "system", label: "Runtime", effective: true }],
+          },
+          {
+            ...mcpServer,
+            id: ProviderExtensionItemId.make("user-alpha"),
+            name: "alpha-user",
+            origins: [{ scope: "user", label: "User config", effective: true }],
+          },
+          {
+            ...mcpServer,
+            id: ProviderExtensionItemId.make("project-zeta"),
+            name: "zeta-project",
+            origins: [{ scope: "project", label: "Project config", effective: true }],
+          },
+          {
+            ...mcpServer,
+            id: ProviderExtensionItemId.make("project-alpha"),
+            name: "alpha-project",
+            origins: [{ scope: "project", label: "Project config", effective: true }],
+          },
+        ],
+        skills: [
+          { ...skill, id: ProviderExtensionItemId.make("zeta"), name: "zeta" },
+          { ...skill, id: ProviderExtensionItemId.make("alpha"), name: "alpha" },
+        ],
+      },
+      { skillsCollapsed: false },
+    );
+
+    const orderedIds = ["project-alpha", "project-zeta", "user-alpha", "runtime-zeta"];
+    for (let index = 1; index < orderedIds.length; index += 1) {
+      expect(markup.indexOf(`data-extension-mcp-id="${orderedIds[index - 1]}"`)).toBeLessThan(
+        markup.indexOf(`data-extension-mcp-id="${orderedIds[index]}"`),
+      );
+    }
+    expect(markup.indexOf('data-extension-skill-id="alpha"')).toBeLessThan(
+      markup.indexOf('data-extension-skill-id="zeta"'),
+    );
+  });
+
+  it("explains contributing and active config layers directly", () => {
+    const value = snapshot();
+    const markup = render({
+      ...value,
+      mcpServers: [
+        {
+          ...value.mcpServers[0]!,
+          origins: [
+            { scope: "project", label: "Project config", effective: true },
+            { scope: "user", label: "User config", effective: false },
+          ],
+        },
+      ],
+    });
+
+    expect(markup).toContain("Defined in: Project config, User config");
+    expect(markup).toContain("Active: Project config");
+    expect(markup).not.toContain("Origin stack");
+    expect(markup).not.toContain("Effective ·");
   });
 
   it("explains unsupported inventory without hiding either section", () => {

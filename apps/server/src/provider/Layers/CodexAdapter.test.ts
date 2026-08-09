@@ -2156,6 +2156,37 @@ it("merges layered MCP definitions and locks the injected T3 server", () => {
   );
 });
 
+it("uses Codex layer precedence when an MCP definition has no aggregate origin", () => {
+  const projectLayer = {
+    name: { type: "project" as const, dotCodexFolder: "/workspace/repo/.codex" },
+    version: "project-version",
+    config: { mcp_servers: { shared: { command: "project-server" } } },
+  };
+  const userLayer = {
+    name: { type: "user" as const, file: "/home/test/.codex/config.toml" },
+    version: "user-version",
+    config: { mcp_servers: { shared: { command: "user-server" } } },
+  };
+  const [definition] = parseCodexMcpDefinitions({
+    config: { mcp_servers: { shared: { command: "project-server" } } },
+    layers: [projectLayer, userLayer],
+    origins: {
+      "mcp_servers.shared.command": {
+        name: projectLayer.name,
+        version: projectLayer.version,
+      },
+    },
+  });
+
+  NodeAssert.deepStrictEqual(
+    definition?.origins.map((origin) => [origin.scope, origin.effective]),
+    [
+      ["project", true],
+      ["user", false],
+    ],
+  );
+});
+
 it.effect("overlays MCP live status notifications without polling", () => {
   const runtimeFactory = makeRuntimeFactory((runtime) => {
     runtime.readMcpConfigImpl.mockImplementation(() =>
