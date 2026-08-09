@@ -1582,6 +1582,40 @@ it.effect("reaps a management-only runtime after its idle window", () => {
   );
 });
 
+it.effect("does not let project discovery replace a worktree first-turn session", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const threadId = asThreadId("thread-prepared-worktree");
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      yield* adapter.extensions.skills!.inventory({
+        threadId,
+        cwd: "/workspace/project",
+      });
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        cwd: "/workspace/project/.t3/worktrees/new-thread",
+        runtimeMode: "full-access",
+      });
+
+      const preparedRuntime = runtimeFactory.runtimes[0]!;
+      const firstTurnRuntime = runtimeFactory.runtimes[1]!;
+      NodeAssert.equal(preparedRuntime.closeImpl.mock.calls.length, 1);
+      yield* adapter.extensions.skills!.inventory({
+        threadId,
+        cwd: "/workspace/project",
+      });
+
+      NodeAssert.equal(runtimeFactory.runtimes.length, 2);
+      NodeAssert.equal(firstTurnRuntime.closeImpl.mock.calls.length, 0);
+      NodeAssert.equal(yield* adapter.hasSession(threadId), true);
+      yield* adapter.sendTurn({ threadId, input: "first turn" });
+      NodeAssert.equal(firstTurnRuntime.sendTurnImpl.mock.calls.length, 1);
+    }),
+  );
+});
+
 it.effect("records overrides without starting a runtime when no session is active", () => {
   const runtimeFactory = makeRuntimeFactory();
   return withExtensionsTestAdapter(runtimeFactory, (adapter) =>

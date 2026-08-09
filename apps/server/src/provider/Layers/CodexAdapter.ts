@@ -2406,6 +2406,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     if (existing && !existing.stopped && existing.cwd === cwd) {
       return existing;
     }
+    if (existing && !existing.stopped && (existing.starting || existing.started)) {
+      // Inventory is observational once a provider session is active. Session/workspace
+      // replacement belongs to ProviderService's start path; discovery must not tear down a
+      // zero-turn session and strand its not-yet-persisted Codex rollout.
+      return existing;
+    }
     if (existing && !existing.stopped) {
       skillInventoryCache.cache.delete(cacheKey(existing.cwd));
       mcpDefinitionCache.cache.delete(cacheKey(existing.cwd));
