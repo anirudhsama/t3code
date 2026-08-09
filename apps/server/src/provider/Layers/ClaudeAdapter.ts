@@ -21,6 +21,7 @@ import {
   type ModelUsage,
   type McpServerConfig,
   type McpServerStatus,
+  type McpSetServersResult,
   type SlashCommand,
   type Settings,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -82,6 +83,7 @@ import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -244,6 +246,9 @@ interface ClaudeSessionContext {
   session: ProviderSession;
   readonly cwd: string;
   readonly launchIdentity: string;
+  readonly resumeLaunchIdentity: string;
+  readonly mcpSessionIdentity: string;
+  readonly modelOptionsIdentity: string;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
@@ -308,7 +313,9 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly mcpServerStatus: () => Promise<McpServerStatus[]>;
   readonly toggleMcpServer: (serverName: string, enabled: boolean) => Promise<void>;
   readonly reconnectMcpServer: (serverName: string) => Promise<void>;
-  readonly setMcpServers: (servers: Record<string, McpServerConfig>) => Promise<unknown>;
+  readonly setMcpServers: (
+    servers: Record<string, McpServerConfig>,
+  ) => Promise<McpSetServersResult>;
   readonly close: () => void;
 }
 
@@ -1245,6 +1252,34 @@ function syntheticClaudeSkillId(name: string) {
   return ProviderExtensionItemId.make(`claude:skill:${name}`);
 }
 
+function claudeModelOptionsIdentity(modelSelection: ModelSelection | undefined): string {
+  const caps = getClaudeModelCapabilities(modelSelection?.model);
+  const descriptors = getProviderOptionDescriptors({ caps });
+  const effort = resolveClaudeEffort(
+    caps,
+    getModelSelectionStringOptionValue(modelSelection, "effort"),
+  );
+  const fastMode =
+    descriptors.some(
+      (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
+    ) && getModelSelectionBooleanOptionValue(modelSelection, "fastMode") === true;
+  const thinking = descriptors.some(
+    (descriptor) => descriptor.type === "boolean" && descriptor.id === "thinking",
+  )
+    ? getModelSelectionBooleanOptionValue(modelSelection, "thinking")
+    : undefined;
+  return (
+    encodeJsonStringForDiagnostics({
+      effort: getEffectiveClaudeAgentEffort(effort, modelSelection?.model),
+      settings: {
+        ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
+        ...(fastMode ? { fastMode: true } : {}),
+        ...(isClaudeUltracodeEffort(effort) ? { ultracode: true } : {}),
+      },
+    }) ?? ""
+  );
+}
+
 function claudeSkillScope(
   scope: ClaudeSkillCandidate["scope"],
 ): ProviderSkillInventoryItem["scope"] {
@@ -1257,23 +1292,24 @@ export function joinClaudeSkillCatalog(
 ): ReadonlyArray<ProviderSkillInventoryItem> {
   const unused = new Set(candidates.map((candidate) => candidate.path));
   const rows: ProviderSkillInventoryItem[] = [];
-  const seenCommands = new Set<string>();
-  for (const command of catalog) {
-    if (seenCommands.has(command.name)) continue;
-    seenCommands.add(command.name);
-    const matching = candidates.filter(
-      (candidate) =>
-        unused.has(candidate.path) &&
-        (candidate.providerName === command.name ||
-          (candidate.scope !== "plugin" && candidate.name === command.name)),
-    );
-    const candidate =
-      matching.find((item) => item.description && command.description.includes(item.description)) ??
-      matching[0];
+  const commandsByName = Map.groupBy(catalog, (command) => command.name);
+  for (const [name, commands] of commandsByName) {
+    const matching = candidates
+      .filter(
+        (candidate) =>
+          unused.has(candidate.path) &&
+          (candidate.providerName === name ||
+            (candidate.scope !== "plugin" && candidate.name === name)),
+      )
+      .sort(
+        (left, right) => left.precedence - right.precedence || left.path.localeCompare(right.path),
+      );
+    const candidate = matching[0];
     if (!candidate) {
+      const command = commands[0]!;
       rows.push({
-        id: syntheticClaudeSkillId(command.name),
-        name: command.name,
+        id: syntheticClaudeSkillId(name),
+        name,
         description: command.description,
         scope: "system" as const,
         providerEnabled: true,
@@ -1285,6 +1321,10 @@ export function joinClaudeSkillCatalog(
       });
       continue;
     }
+    const command =
+      commands.find(
+        (item) => candidate.description && item.description.includes(candidate.description),
+      ) ?? commands[0]!;
     const winnerId = ProviderExtensionItemId.make(candidate.path);
     for (const match of matching) {
       unused.delete(match.path);
@@ -1292,7 +1332,7 @@ export function joinClaudeSkillCatalog(
       const winner = id === winnerId;
       rows.push({
         id,
-        name: command.name,
+        name,
         description: winner ? command.description || match.description : match.description,
         scope: claudeSkillScope(match.scope),
         path: match.path,
@@ -1307,36 +1347,6 @@ export function joinClaudeSkillCatalog(
         },
       });
     }
-  }
-  const unmatchedWinners = new Map<string, ClaudeSkillCandidate>();
-  for (const candidate of candidates) {
-    if (!unused.has(candidate.path)) continue;
-    const previous = unmatchedWinners.get(candidate.providerName);
-    if (!previous || candidate.precedence < previous.precedence) {
-      unmatchedWinners.set(candidate.providerName, candidate);
-    }
-  }
-  for (const candidate of candidates) {
-    if (!unused.has(candidate.path)) continue;
-    const winner = unmatchedWinners.get(candidate.providerName)!;
-    const winnerId = ProviderExtensionItemId.make(winner.path);
-    const id = ProviderExtensionItemId.make(candidate.path);
-    rows.push({
-      id,
-      name: candidate.providerName,
-      ...(candidate.description ? { description: candidate.description } : {}),
-      scope: claudeSkillScope(candidate.scope),
-      path: candidate.path,
-      providerEnabled: false,
-      precedence: candidate.precedence,
-      ...(id !== winnerId ? { shadowedBy: winnerId } : {}),
-      origin: {
-        scope: claudeSkillScope(candidate.scope),
-        label: candidate.label,
-        path: candidate.declaredPath,
-        effective: false,
-      },
-    });
   }
   return rows;
 }
@@ -1365,7 +1375,39 @@ function sanitizeClaudeMcpError(error: string | undefined): string | undefined {
   const trimmed = error?.trim();
   if (!trimmed) return undefined;
   return trimmed
-    .replace(/(authorization|bearer|token|secret|password)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(
+      /\b(authorization|proxy-authorization)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\r\n,;}]+)/gi,
+      "$1=[redacted]",
+    )
+    .replace(
+      /(["']?(?:access[-_]?token|api[-_]?key|credential|password|secret|token)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi,
+      "$1[redacted]",
+    )
+    .replace(/https?:\/\/[^\s"'<>]+/gi, (rawUrl) => {
+      try {
+        const url = new URL(rawUrl);
+        if (
+          /(?:auth|authorize|login|oauth)/i.test(url.pathname) ||
+          [...url.searchParams.keys()].some((key) =>
+            /(?:client_id|code_challenge|redirect_uri|response_type)/i.test(key),
+          )
+        ) {
+          return "[redacted-auth-url]";
+        }
+        if (url.username) url.username = "redacted";
+        if (url.password) url.password = "redacted";
+        for (const key of url.searchParams.keys()) {
+          if (/(?:auth|code|credential|key|password|secret|state|token)/i.test(key)) {
+            url.searchParams.set(key, "redacted");
+          }
+        }
+        url.hash = "";
+        return url.toString();
+      } catch {
+        return "[redacted-url]";
+      }
+    })
     .slice(0, 500);
 }
 
@@ -1986,6 +2028,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   >();
   const latestSkillRequest = new Map<string, number>();
   const pendingSkillInvalidations = new Set<ThreadId>();
+  const skillInvalidationRevisions = new Map<ThreadId, number>();
+  const reconciliationLocks = new Map<ThreadId, Semaphore.Semaphore>();
   let nextInventoryRequestId = 0;
   let inventoryRevision = 0;
   const managementIdleTimeout = Duration.millis(
@@ -1994,8 +2038,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const canonicalizeCwd = (cwd: string) =>
     fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => cwd));
-  const skillCacheKey = (threadId: ThreadId, cwd: string) =>
-    `${boundInstanceId}\u0000${threadId}\u0000${cwd}`;
+  const skillCacheKey = (context: ClaudeSessionContext) =>
+    `${boundInstanceId}\u0000${context.session.threadId}\u0000${context.launchIdentity}`;
+  const getReconciliationLock = Effect.fnUntraced(function* (threadId: ThreadId) {
+    const existing = reconciliationLocks.get(threadId);
+    if (existing) return existing;
+    const created = yield* Semaphore.make(1);
+    const raced = reconciliationLocks.get(threadId);
+    if (raced) return raced;
+    reconciliationLocks.set(threadId, created);
+    return created;
+  });
   const reconciliationState = (threadId: ThreadId): ProviderExtensionReconciliationState =>
     extensionReconciliationStates.get(threadId) ?? { appliedOverrideRevision: 0 };
 
@@ -3957,6 +4010,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (context.stopped) return;
 
     context.stopped = true;
+    const managementIdleFiber = context.managementIdleFiber;
+    context.managementIdleFiber = undefined;
+    if (managementIdleFiber && managementIdleFiber.pollUnsafe() === undefined) {
+      yield* Fiber.interrupt(managementIdleFiber).pipe(Effect.ignore);
+    }
 
     for (const [requestId, pending] of context.pendingApprovals) {
       yield* Deferred.succeed(pending.decision, "cancel");
@@ -4034,7 +4092,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    sessions.delete(context.session.threadId);
+    if (sessions.get(context.session.threadId) === context) {
+      sessions.delete(context.session.threadId);
+    }
   });
 
   const requireSession = (
@@ -4063,6 +4123,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const startSessionInternal = Effect.fn("startSessionInternal")(function* (
     input: Parameters<ClaudeAdapterShape["startSession"]>[0],
     managementOnly: boolean,
+    reconcileProjectedOverrides = true,
   ) {
     if (input.provider !== undefined && input.provider !== PROVIDER) {
       return yield* new ProviderAdapterValidationError({
@@ -4075,10 +4136,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const cwd = yield* canonicalizeCwd(input.cwd ?? process.cwd());
     const resumeState = readClaudeResumeState(input.resumeCursor);
     const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+    const resumeLaunchIdentity = resumeState?.resume ?? "";
+    const mcpSessionIdentity = mcpSession?.providerSessionId ?? "";
+    const launchModelSelection =
+      input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
+    const modelOptionsIdentity = claudeModelOptionsIdentity(launchModelSelection);
     const launchIdentity = [
       cwd,
-      resumeState?.resume ?? "",
-      mcpSession?.providerSessionId ?? "",
+      resumeLaunchIdentity,
+      mcpSessionIdentity,
+      modelOptionsIdentity,
     ].join("\u0000");
     const existingContext = sessions.get(input.threadId);
     if (
@@ -4093,43 +4160,62 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         existingContext.managementIdleFiber = undefined;
       }
       existingContext.starting = true;
-      const modelSelection =
-        input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
-      const apiModelId = modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined;
-      if (apiModelId !== existingContext.currentApiModelId) {
+      const adopted = yield* Effect.gen(function* () {
+        const modelSelection =
+          input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
+        const apiModelId = modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined;
+        if (apiModelId !== existingContext.currentApiModelId) {
+          yield* Effect.tryPromise({
+            try: () => existingContext.query.setModel(apiModelId),
+            catch: (cause) => toRequestError(input.threadId, "session/setModel", cause),
+          });
+          existingContext.currentApiModelId = apiModelId;
+        }
+        const permissionMode = permissionModeForRuntime(input.runtimeMode);
         yield* Effect.tryPromise({
-          try: () => existingContext.query.setModel(apiModelId),
-          catch: (cause) => toRequestError(input.threadId, "session/setModel", cause),
+          try: () => existingContext.query.setPermissionMode(permissionMode ?? "default"),
+          catch: (cause) => toRequestError(input.threadId, "session/setPermissionMode", cause),
         });
-        existingContext.currentApiModelId = apiModelId;
-      }
-      const permissionMode = permissionModeForRuntime(input.runtimeMode);
-      yield* Effect.tryPromise({
-        try: () => existingContext.query.setPermissionMode(permissionMode ?? "default"),
-        catch: (cause) => toRequestError(input.threadId, "session/setPermissionMode", cause),
-      });
-      existingContext.basePermissionMode = permissionMode;
-      const updatedAt = yield* nowIso;
-      existingContext.session = {
-        ...existingContext.session,
-        runtimeMode: input.runtimeMode,
-        cwd,
-        ...(modelSelection?.model ? { model: modelSelection.model } : {}),
-        updatedAt,
-      };
-      existingContext.started = true;
-      existingContext.starting = false;
-      if (input.extensionOverrides) {
-        yield* reconcileOverrides({
-          threadId: input.threadId,
-          cwd,
+        existingContext.basePermissionMode = permissionMode;
+        existingContext.currentEffort = modelSelection
+          ? (getEffectiveClaudeAgentEffort(
+              resolveClaudeEffort(
+                getClaudeModelCapabilities(modelSelection.model),
+                getModelSelectionStringOptionValue(modelSelection, "effort"),
+              ),
+              modelSelection.model,
+            ) ?? undefined)
+          : undefined;
+        existingContext.lastKnownContextWindow = selectedClaudeContextWindow(modelSelection);
+        const updatedAt = yield* nowIso;
+        existingContext.session = {
+          ...existingContext.session,
           runtimeMode: input.runtimeMode,
-          ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
-          skillOverrides: input.extensionOverrides.skills,
-          mcpOverrides: input.extensionOverrides.mcp,
-          extensionOverridesRevision: input.extensionOverrides.revision,
-        });
-      }
+          cwd,
+          ...(modelSelection?.model ? { model: modelSelection.model } : {}),
+          updatedAt,
+        };
+        if (input.extensionOverrides) {
+          yield* reconcileOverrides({
+            threadId: input.threadId,
+            cwd,
+            runtimeMode: input.runtimeMode,
+            ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
+            skillOverrides: input.extensionOverrides.skills,
+            mcpOverrides: input.extensionOverrides.mcp,
+            extensionOverridesRevision: input.extensionOverrides.revision,
+          });
+        }
+        existingContext.started = true;
+        existingContext.starting = false;
+        return { apiModelId, permissionMode };
+      }).pipe(
+        Effect.onError(() =>
+          Effect.sync(() => {
+            existingContext.starting = false;
+          }).pipe(Effect.andThen(scheduleManagementIdleCleanup(existingContext))),
+        ),
+      );
       const stamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
         type: "session.started",
@@ -4149,9 +4235,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         threadId: input.threadId,
         payload: {
           config: {
-            ...(apiModelId ? { model: apiModelId } : {}),
+            ...(adopted.apiModelId ? { model: adopted.apiModelId } : {}),
             cwd,
-            ...(permissionMode ? { permissionMode } : {}),
+            ...(adopted.permissionMode ? { permissionMode: adopted.permissionMode } : {}),
           },
         },
         providerRefs: {},
@@ -4392,7 +4478,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         } satisfies PermissionResult;
       }
 
-      const runtimeMode = input.runtimeMode ?? "full-access";
+      const runtimeMode = context.session.runtimeMode;
       if (runtimeMode === "full-access") {
         return {
           behavior: "allow",
@@ -4665,6 +4751,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       session,
       cwd,
       launchIdentity,
+      resumeLaunchIdentity,
+      mcpSessionIdentity,
+      modelOptionsIdentity,
       promptQueue,
       query: queryRuntime,
       streamFiber: undefined,
@@ -4692,18 +4781,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       managementLeaseCount: 0,
       managementIdleFiber: undefined,
       baseDynamicMcpServers: new Map(
-        queryOptions.mcpServers
-          ? Object.entries(queryOptions.mcpServers).filter(
-              (entry): entry is [string, McpServerConfig] => entry[1].type !== "sdk",
-            )
-          : [],
+        queryOptions.mcpServers ? Object.entries(queryOptions.mcpServers) : [],
       ),
       dynamicMcpServers: new Map(
-        queryOptions.mcpServers
-          ? Object.entries(queryOptions.mcpServers).filter(
-              (entry): entry is [string, McpServerConfig] => entry[1].type !== "sdk",
-            )
-          : [],
+        queryOptions.mcpServers ? Object.entries(queryOptions.mcpServers) : [],
       ),
       baseFileMcpEnabled: new Map(),
       appliedSkillOverrides: {},
@@ -4783,7 +4864,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     });
 
-    if (projectedOverrides) {
+    if (projectedOverrides && reconcileProjectedOverrides) {
       yield* reconcileOverrides({
         threadId,
         cwd,
@@ -4793,7 +4874,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         skillOverrides: projectedOverrides.skills,
         mcpOverrides: projectedOverrides.mcp,
         extensionOverridesRevision: projectedOverrides.revision,
-      });
+      }).pipe(
+        Effect.onError(() =>
+          stopSessionInternal(context, { emitExitEvent: false }).pipe(Effect.ignore),
+        ),
+      );
     }
 
     return {
@@ -4804,8 +4889,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const startSession: ClaudeAdapterShape["startSession"] = (input) =>
     startSessionInternal(input, false);
 
-  const releaseManagementContext = Effect.fnUntraced(function* (context: ClaudeSessionContext) {
-    context.managementLeaseCount = Math.max(0, context.managementLeaseCount - 1);
+  const scheduleManagementIdleCleanup = Effect.fnUntraced(function* (
+    context: ClaudeSessionContext,
+  ) {
     if (
       context.managementLeaseCount > 0 ||
       context.started ||
@@ -4816,14 +4902,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
     const fiber = yield* Effect.sleep(managementIdleTimeout).pipe(
-      Effect.flatMap(() =>
-        context.managementLeaseCount === 0 &&
-        !context.started &&
-        !context.starting &&
-        !context.stopped
-          ? stopSessionInternal(context, { emitExitEvent: false })
-          : Effect.void,
-      ),
+      Effect.flatMap(() => {
+        if (
+          context.managementLeaseCount > 0 ||
+          context.started ||
+          context.starting ||
+          context.stopped
+        ) {
+          return Effect.void;
+        }
+        context.managementIdleFiber = undefined;
+        return stopSessionInternal(context, { emitExitEvent: false });
+      }),
       Effect.catch(() => Effect.void),
       Effect.forkIn(adapterScope),
     );
@@ -4831,6 +4921,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     fiber.addObserver(() => {
       if (context.managementIdleFiber === fiber) context.managementIdleFiber = undefined;
     });
+  });
+
+  const releaseManagementContext = Effect.fnUntraced(function* (context: ClaudeSessionContext) {
+    context.managementLeaseCount = Math.max(0, context.managementLeaseCount - 1);
+    yield* scheduleManagementIdleCleanup(context);
   });
 
   const withManagementContext = <A, E>(
@@ -4848,20 +4943,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const ensureExtensionContext = Effect.fn("ClaudeAdapter.ensureExtensionContext")(function* (
     input: Parameters<NonNullable<ProviderExtensionsShape["skills"]>["inventory"]>[0],
+    skipProjectedReconciliation = false,
   ) {
     const cwd = yield* canonicalizeCwd(input.cwd);
-    const resumeState = readClaudeResumeState(input.resumeCursor);
     const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
-    const launchIdentity = [
-      cwd,
-      resumeState?.resume ?? "",
-      mcpSession?.providerSessionId ?? "",
-    ].join("\u0000");
     const existing = sessions.get(input.threadId);
-    if (existing && !existing.stopped && existing.launchIdentity === launchIdentity)
+    const requestedResumeIdentity =
+      input.resumeCursor === undefined
+        ? undefined
+        : (readClaudeResumeState(input.resumeCursor)?.resume ?? "");
+    if (
+      existing &&
+      !existing.stopped &&
+      existing.cwd === cwd &&
+      existing.mcpSessionIdentity === (mcpSession?.providerSessionId ?? "") &&
+      (requestedResumeIdentity === undefined ||
+        existing.resumeLaunchIdentity === requestedResumeIdentity)
+    )
       return existing;
     if (existing && !existing.stopped) {
-      skillInventoryCache.delete(skillCacheKey(existing.session.threadId, existing.cwd));
+      skillInventoryCache.delete(skillCacheKey(existing));
       yield* stopSessionInternal(existing, { emitExitEvent: false });
     }
     yield* startSessionInternal(
@@ -4875,6 +4976,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
       },
       true,
+      !skipProjectedReconciliation,
     );
     return sessions.get(input.threadId)!;
   });
@@ -4911,7 +5013,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     "ClaudeAdapter.readSkillInventory",
   )(function* (input: Parameters<NonNullable<ProviderExtensionsShape["skills"]>["inventory"]>[0]) {
     const context = yield* ensureExtensionContext(input);
-    const key = skillCacheKey(context.session.threadId, context.cwd);
+    const key = skillCacheKey(context);
     if (!input.forceReload) {
       const cached = skillInventoryCache.get(key);
       if (cached) return cached;
@@ -4945,6 +5047,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         method: "reloadSkills",
         detail: "A newer Claude skill inventory request superseded this result.",
       });
+    }
+    if (sessions.get(context.session.threadId) !== context || context.stopped) {
+      const error = new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "reloadSkills",
+        detail: "The Claude skill inventory context changed before the request completed.",
+      });
+      yield* Deferred.fail(deferred, error);
+      if (skillInventoryInFlight.get(key) === deferred) skillInventoryInFlight.delete(key);
+      return yield* error;
     }
     if (Exit.isFailure(loaded)) {
       yield* Deferred.failCause(deferred, loaded.cause);
@@ -5017,42 +5129,57 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   } satisfies NonNullable<ProviderExtensionsShape["skills"]>;
 
   const scheduleSkillInvalidation = Effect.fnUntraced(function* (context: ClaudeSessionContext) {
-    if (pendingSkillInvalidations.has(context.session.threadId)) return;
+    const threadId = context.session.threadId;
+    skillInvalidationRevisions.set(threadId, (skillInvalidationRevisions.get(threadId) ?? 0) + 1);
+    if (pendingSkillInvalidations.has(threadId)) return;
     pendingSkillInvalidations.add(context.session.threadId);
-    skillInventoryCache.delete(skillCacheKey(context.session.threadId, context.cwd));
+    skillInventoryCache.delete(skillCacheKey(context));
     yield* PubSub.publish(extensionEvents, {
       type: "inventory.invalidated",
-      threadId: context.session.threadId,
+      threadId,
       cwd: context.cwd,
       domain: "skills",
     });
-    yield* Effect.yieldNow.pipe(
-      Effect.flatMap(() =>
-        readSkillInventory({
-          threadId: context.session.threadId,
+    yield* Effect.gen(function* () {
+      yield* Effect.yieldNow;
+      while (true) {
+        if (sessions.get(threadId) !== context || context.stopped) {
+          pendingSkillInvalidations.delete(threadId);
+          return;
+        }
+        const requestedRevision = skillInvalidationRevisions.get(threadId) ?? 0;
+        const loaded = yield* readSkillInventory({
+          threadId,
           cwd: context.cwd,
           forceReload: true,
-        }),
-      ),
-      Effect.flatMap((inventory) =>
-        PubSub.publish(extensionEvents, {
-          type: "inventory.updated",
-          threadId: context.session.threadId,
-          cwd: context.cwd,
-          domain: "skills",
-          revision: inventory.revision,
-        }),
-      ),
-      Effect.catch((cause) =>
-        Effect.logWarning("Failed to refresh Claude skills after invalidation.", {
-          threadId: context.session.threadId,
-          cwd: context.cwd,
-          cause,
-        }),
-      ),
-      Effect.ensuring(
-        Effect.sync(() => pendingSkillInvalidations.delete(context.session.threadId)),
-      ),
+        }).pipe(Effect.exit);
+        if (sessions.get(threadId) !== context || context.stopped) {
+          pendingSkillInvalidations.delete(threadId);
+          return;
+        }
+        if (Exit.isSuccess(loaded)) {
+          yield* PubSub.publish(extensionEvents, {
+            type: "inventory.updated",
+            threadId,
+            cwd: context.cwd,
+            domain: "skills",
+            revision: loaded.value.revision,
+          });
+        } else {
+          yield* Effect.logWarning("Failed to refresh Claude skills after invalidation.", {
+            threadId,
+            cwd: context.cwd,
+          });
+        }
+        const settled = yield* Effect.sync(() => {
+          if ((skillInvalidationRevisions.get(threadId) ?? 0) !== requestedRevision) return false;
+          pendingSkillInvalidations.delete(threadId);
+          return true;
+        });
+        if (settled) return;
+      }
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => pendingSkillInvalidations.delete(threadId))),
       Effect.forkIn(adapterScope),
     );
   });
@@ -5079,9 +5206,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }),
   } satisfies ProviderExtensionMcpFacet;
 
-  const reconcileOverrides: NonNullable<ProviderExtensionsShape["reconcileOverrides"]> = Effect.fn(
-    "ClaudeAdapter.reconcileOverrides",
-  )(function* (input) {
+  const reconcileOverridesUnlocked = Effect.fn("ClaudeAdapter.reconcileOverrides")(function* (
+    input: ProviderExtensionReconciliationInput,
+  ) {
     const current = reconciliationState(input.threadId);
     const currentContext = sessions.get(input.threadId);
     if (
@@ -5100,21 +5227,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       pendingOverrideRevision: input.extensionOverridesRevision,
     });
     if (input.defer) return { state: pending };
-    const context = sessions.get(input.threadId);
-    if (!context || context.stopped) {
+    const existingContext = sessions.get(input.threadId);
+    if (!existingContext || existingContext.stopped) {
       const state = yield* publishReconciliationState(input, {
         appliedOverrideRevision: input.extensionOverridesRevision,
       });
       return { state };
     }
-    if (context.turnState) return { state: pending };
+    if (existingContext.turnState) return { state: pending };
+    const context = yield* ensureExtensionContext(input, true);
 
     const applied = yield* Effect.gen(function* () {
       const skills = yield* readSkillInventory({ ...input, forceReload: true });
       const nativeSkillOverrides: NonNullable<Settings["skillOverrides"]> = {};
       for (const [id, state] of Object.entries(input.skillOverrides)) {
         const row = skills.items.find((skill) => skill.id === id);
-        if (!row || row.shadowedBy) continue;
+        if (!row?.providerEnabled || row.shadowedBy) continue;
         nativeSkillOverrides[row.name] = state === "disabled" ? "off" : "on";
       }
       if (!overridesEqual(context.appliedSkillOverrides, input.skillOverrides)) {
@@ -5154,9 +5282,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
       }
       if (dynamicChanged) {
-        yield* Effect.tryPromise({
+        const result = yield* Effect.tryPromise({
           try: () => context.query.setMcpServers(Object.fromEntries(context.dynamicMcpServers)),
           catch: (cause) => toRequestError(input.threadId, "setMcpServers", cause),
+        });
+        if (Object.keys(result.errors).length > 0) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "setMcpServers",
+            detail: "setMcpServers reported one or more server errors",
+          });
+        }
+      }
+      if (sessions.get(input.threadId) !== context || context.stopped) {
+        return yield* new ProviderAdapterSessionClosedError({
+          provider: PROVIDER,
+          threadId: input.threadId,
         });
       }
       context.appliedSkillOverrides = { ...input.skillOverrides };
@@ -5188,6 +5329,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return { state, ...(context.started ? { session: { ...context.session } } : {}) };
   });
 
+  const reconcileOverrides: NonNullable<ProviderExtensionsShape["reconcileOverrides"]> = (input) =>
+    Effect.flatMap(getReconciliationLock(input.threadId), (lock) =>
+      lock.withPermit(reconcileOverridesUnlocked(input)),
+    );
+
   const validateSelectedSkills = Effect.fn("ClaudeAdapter.validateSelectedSkills")(function* (
     input: ProviderSendTurnInput,
     context: ClaudeSessionContext,
@@ -5218,6 +5364,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
       const override = desired?.skillOverrides[selected.id];
       const enabled =
+        skill.providerEnabled &&
         !skill.shadowedBy &&
         (override === "enabled" || (override === undefined && skill.providerEnabled));
       if (!enabled) {

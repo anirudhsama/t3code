@@ -83,7 +83,11 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public skills: SlashCommand[] = [];
   public plugins: Array<{ name: string; path: string; source?: string }> = [];
   public mcpStatuses: McpServerStatus[] = [];
+  public reloadSkillsImpl: (() => Promise<{ readonly skills: SlashCommand[] }>) | undefined;
+  public applyFlagSettingsImpl: ((settings: Partial<Settings>) => Promise<void>) | undefined;
   public toggleMcpServerFailure: unknown | undefined;
+  public setPermissionModeFailure: unknown | undefined;
+  public setMcpServersErrors: Record<string, string> = {};
   public closeCalls = 0;
 
   emit(message: SDKMessage): void {
@@ -134,6 +138,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly setPermissionMode = async (mode: PermissionMode): Promise<void> => {
     this.setPermissionModeCalls.push(mode);
+    if (this.setPermissionModeFailure !== undefined) throw this.setPermissionModeFailure;
   };
 
   readonly setMaxThinkingTokens = async (maxThinkingTokens: number | null): Promise<void> => {
@@ -147,6 +152,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly reloadSkills = async () => {
     this.reloadSkillsCalls += 1;
+    if (this.reloadSkillsImpl) return this.reloadSkillsImpl();
     return { skills: this.skills };
   };
 
@@ -157,6 +163,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly applyFlagSettings = async (settings: Partial<Settings>): Promise<void> => {
     this.applyFlagSettingsCalls.push(settings);
+    await this.applyFlagSettingsImpl?.(settings);
   };
 
   readonly mcpServerStatus = async (): Promise<McpServerStatus[]> => {
@@ -175,7 +182,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly setMcpServers = async (servers: Record<string, McpServerConfig>) => {
     this.setMcpServersCalls.push(servers);
-    return { added: [], removed: [], errors: {} };
+    return { added: [], removed: [], errors: this.setMcpServersErrors };
   };
 
   readonly close = (): void => {
@@ -365,7 +372,10 @@ describe("ClaudeAdapterLive", () => {
     const personalPath = "/config/skills/deploy/SKILL.md";
     const projectPath = "/repo/.claude/skills/deploy/SKILL.md";
     const items = joinClaudeSkillCatalog(
-      [{ name: "deploy", description: "Personal deploy", argumentHint: "" }],
+      [
+        { name: "deploy", description: "Project deploy", argumentHint: "" },
+        { name: "deploy", description: "Personal deploy", argumentHint: "" },
+      ],
       [
         {
           name: "deploy",
@@ -407,7 +417,8 @@ describe("ClaudeAdapterLive", () => {
           name: "docs",
           status: "failed",
           scope: "project",
-          error: "token=secret connection refused",
+          error:
+            "Authorization: Bearer header-secret; url=https://user:password@example.test/mcp?access_token=query-secret; login=https://auth.example.test/oauth/authorize?client_id=client",
           tools: [{ name: "search" }],
         },
         { name: "account", status: "needs-auth", scope: "user" },
@@ -448,7 +459,11 @@ describe("ClaudeAdapterLive", () => {
         },
       ],
     );
-    assert.equal(items[0]?.error, "token=[redacted] connection refused");
+    assert.notMatch(
+      items[0]?.error ?? "",
+      /header-secret|password|query-secret|auth\.example\.test/u,
+    );
+    assert.match(items[0]?.error ?? "", /\[redacted\]|redacted/u);
     assert.deepEqual(
       {
         managed: items[2]?.managed,
@@ -4529,6 +4544,131 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("uses the adopted first turn runtime mode for permission callbacks", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.extensions.skills!.inventory({
+        threadId: THREAD_ID,
+        cwd: "/tmp/claude-adapter-test",
+        runtimeMode: "approval-required",
+      });
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-adapter-test",
+      });
+
+      const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+      assert.isFunction(canUseTool);
+      const result = yield* Effect.promise(() =>
+        canUseTool!(
+          "Bash",
+          { command: "pwd" },
+          { signal: new AbortController().signal, toolUseID: "tool-1" },
+        ),
+      );
+      assert.deepEqual(result, {
+        behavior: "allow",
+        updatedInput: { command: "pwd" },
+      });
+      assert.equal(harness.getCreateQueryCallCount(), 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("rearms idle cleanup when prepared-query adoption fails", () => {
+    const harness = makeHarness({ managementIdleTimeoutMs: 1_000 });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.extensions.skills!.inventory({
+        threadId: THREAD_ID,
+        cwd: "/tmp/claude-adapter-test",
+      });
+      harness.query.setPermissionModeFailure = new Error("temporary permission failure");
+      const result = yield* adapter
+        .startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          cwd: "/tmp/claude-adapter-test",
+        })
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+
+      yield* TestClock.adjust("1 second");
+      yield* Effect.yieldNow;
+      assert.equal(harness.query.closeCalls, 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("reuses an active resumed query when an internal inventory read omits context", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-adapter-test",
+        resumeCursor: {
+          threadId: THREAD_ID,
+          resume: "550e8400-e29b-41d4-a716-446655440000",
+          turnCount: 1,
+        },
+      });
+
+      yield* adapter.extensions.skills!.inventory({
+        threadId: THREAD_ID,
+        cwd: "/tmp/claude-adapter-test",
+        forceReload: true,
+      });
+      assert.equal(harness.getCreateQueryCallCount(), 1);
+      assert.equal(harness.query.closeCalls, 0);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("recreates a prepared query when first-turn model options are not adoptable", () => {
+    const harness = makeHarness({ queryFactory: () => new FakeClaudeQuery() });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.extensions.skills!.inventory({
+        threadId: THREAD_ID,
+        cwd: "/tmp/claude-adapter-test",
+      });
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-adapter-test",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-4-6",
+          [{ id: "effort", value: "max" }],
+        ),
+      });
+
+      assert.equal(harness.getCreateQueryCallCount(), 2);
+      assert.equal(harness.queries[0]?.closeCalls, 1);
+      assert.equal(harness.getLastCreateQueryInput()?.options.effort, "max");
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("compiles initial skills and reconciles file-backed and dynamic MCP state", () => {
     const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-reconcile-"));
     const cwd = NodePath.join(baseDir, "repo");
@@ -4648,6 +4788,122 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "serializes reconciliation so an older SDK result cannot overwrite the latest revision",
+    () => {
+      const harness = makeHarness();
+      harness.query.skills = [{ name: "deploy", description: "Deploy.", argumentHint: "" }];
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let markFirstStarted!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        markFirstStarted = resolve;
+      });
+      let calls = 0;
+      harness.query.applyFlagSettingsImpl = async () => {
+        calls += 1;
+        if (calls === 1) {
+          markFirstStarted();
+          await firstGate;
+        }
+      };
+
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          cwd: "/tmp/claude-adapter-test",
+        });
+        const skillId = ProviderExtensionItemId.make("claude:skill:deploy");
+        const first = yield* adapter.extensions.reconcileOverrides!({
+          threadId: THREAD_ID,
+          cwd: "/tmp/claude-adapter-test",
+          skillOverrides: { [skillId]: "disabled" },
+          mcpOverrides: {},
+          extensionOverridesRevision: 1,
+        }).pipe(Effect.forkChild);
+        yield* Effect.promise(() => firstStarted);
+        const second = yield* adapter.extensions.reconcileOverrides!({
+          threadId: THREAD_ID,
+          cwd: "/tmp/claude-adapter-test",
+          skillOverrides: { [skillId]: "enabled" },
+          mcpOverrides: {},
+          extensionOverridesRevision: 2,
+        }).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        assert.equal(calls, 1);
+
+        releaseFirst();
+        yield* Fiber.join(first);
+        const latest = yield* Fiber.join(second);
+        assert.equal(latest.state.appliedOverrideRevision, 2);
+        assert.deepEqual(yield* adapter.extensions.reconciliationState!(THREAD_ID), {
+          appliedOverrideRevision: 2,
+        });
+        assert.deepEqual(harness.query.applyFlagSettingsCalls, [
+          { skillOverrides: { deploy: "off" } },
+          { skillOverrides: { deploy: "on" } },
+        ]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("routes SDK-backed T3 dynamic MCP entries through setMcpServers", () => {
+    const sdkConfig = { type: "sdk" } as unknown as McpServerConfig;
+    const harness = makeHarness({ dynamicMcpServers: { runtimeSdk: sdkConfig } });
+    harness.query.mcpStatuses = [
+      { name: "runtimeSdk", status: "connected", scope: "dynamic", tools: [] },
+    ];
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-adapter-test",
+      });
+      harness.query.setMcpServersErrors = {
+        runtimeSdk: "Authorization: Bearer provider-secret",
+      };
+      const failed = yield* adapter.extensions.reconcileOverrides!({
+        threadId: THREAD_ID,
+        cwd: "/tmp/claude-adapter-test",
+        skillOverrides: {},
+        mcpOverrides: { [ProviderExtensionItemId.make("runtimeSdk")]: "disabled" },
+        extensionOverridesRevision: 1,
+      }).pipe(Effect.result);
+
+      assert.equal(failed._tag, "Failure");
+      const failedState = yield* adapter.extensions.reconciliationState!(THREAD_ID);
+      assert.equal(failedState.appliedOverrideRevision, 0);
+      assert.equal(failedState.pendingOverrideRevision, 1);
+      assert.notMatch(failedState.error?.message ?? "", /provider-secret/u);
+
+      harness.query.setMcpServersErrors = {};
+      const retried = yield* adapter.extensions.reconcileOverrides!({
+        threadId: THREAD_ID,
+        cwd: "/tmp/claude-adapter-test",
+        skillOverrides: {},
+        mcpOverrides: { [ProviderExtensionItemId.make("runtimeSdk")]: "disabled" },
+        extensionOverridesRevision: 1,
+      });
+      assert.equal(retried.state.appliedOverrideRevision, 1);
+      assert.deepEqual(harness.query.toggleMcpServerCalls, []);
+      assert.deepEqual(harness.query.setMcpServersCalls, [{}, {}]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("dispatches selected winners by slash name and rejects a shadowed path", () => {
     const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-selected-"));
     const cwd = NodePath.join(baseDir, "repo");
@@ -4655,10 +4911,12 @@ describe("ClaudeAdapterLive", () => {
     const personalPath = NodePath.join(configDir, "skills", "deploy", "SKILL.md");
     const projectPath = NodePath.join(cwd, ".claude", "skills", "deploy", "SKILL.md");
     const reviewPath = NodePath.join(cwd, ".claude", "skills", "review", "SKILL.md");
+    const ghostPath = NodePath.join(cwd, ".claude", "skills", "ghost", "SKILL.md");
     for (const [filePath, name, description] of [
       [personalPath, "deploy", "Personal deploy."],
       [projectPath, "deploy", "Project deploy."],
       [reviewPath, "review", "Review."],
+      [ghostPath, "ghost", "Not loaded by Claude."],
     ] as const) {
       NodeFS.mkdirSync(NodePath.dirname(filePath), { recursive: true });
       NodeFS.writeFileSync(filePath, `---\nname: ${name}\ndescription: ${description}\n---\n`);
@@ -4680,6 +4938,15 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
         cwd,
+      });
+      yield* adapter.extensions.reconcileOverrides!({
+        threadId: THREAD_ID,
+        cwd,
+        skillOverrides: {
+          [ProviderExtensionItemId.make(NodeFS.realpathSync(ghostPath))]: "enabled",
+        },
+        mcpOverrides: {},
+        extensionOverridesRevision: 1,
       });
       yield* adapter.sendTurn({
         threadId: THREAD_ID,
@@ -4720,6 +4987,25 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(stale._tag, "Failure");
       if (stale._tag === "Failure") {
         assert.equal(stale.failure._tag, "ProviderAdapterStaleSkillSelectionError");
+      }
+
+      const unmatched = yield* adapter
+        .sendTurn({
+          threadId: THREAD_ID,
+          input: "Invoke an unloaded candidate",
+          attachments: [],
+          selectedSkills: [
+            {
+              id: ProviderExtensionItemId.make(NodeFS.realpathSync(ghostPath)),
+              name: "ghost",
+              path: NodeFS.realpathSync(ghostPath),
+            },
+          ],
+        })
+        .pipe(Effect.result);
+      assert.equal(unmatched._tag, "Failure");
+      if (unmatched._tag === "Failure") {
+        assert.equal(unmatched.failure._tag, "ProviderAdapterStaleSkillSelectionError");
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -4772,6 +5058,73 @@ describe("ClaudeAdapterLive", () => {
         ["inventory.invalidated", "inventory.updated"],
       );
       assert.equal(harness.query.reloadSkillsCalls, 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("reloads again when commands_changed arrives during an in-flight refresh", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-invalidation-race-"));
+    const cwd = NodePath.join(baseDir, "repo");
+    NodeFS.mkdirSync(NodePath.join(cwd, ".git"), { recursive: true });
+    const harness = makeHarness({
+      cwd,
+      baseDir,
+      claudeConfig: { homePath: NodePath.join(baseDir, "config") },
+    });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    let markSecondStarted!: () => void;
+    const secondStarted = new Promise<void>((resolve) => {
+      markSecondStarted = resolve;
+    });
+    harness.query.reloadSkillsImpl = async () => {
+      if (harness.query.reloadSkillsCalls === 1) {
+        markFirstStarted();
+        await firstGate;
+      } else if (harness.query.reloadSkillsCalls === 2) {
+        markSecondStarted();
+      }
+      return { skills: harness.query.skills };
+    };
+
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd,
+      });
+      harness.query.emit({
+        type: "system",
+        subtype: "commands_changed",
+        commands: [],
+        session_id: "session",
+        uuid: "11111111-1111-4111-8111-111111111111",
+      } as SDKMessage);
+      yield* Effect.promise(() => firstStarted);
+      harness.query.emit({
+        type: "system",
+        subtype: "commands_changed",
+        commands: [],
+        session_id: "session",
+        uuid: "22222222-2222-4222-8222-222222222222",
+      } as SDKMessage);
+      releaseFirst();
+      yield* Effect.promise(() => secondStarted);
+      yield* Effect.yieldNow;
+      assert.equal(harness.query.reloadSkillsCalls, 2);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
