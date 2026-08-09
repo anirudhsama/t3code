@@ -278,6 +278,7 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
+  buildInitialMcpOverrides,
   buildLocalDraftThread,
   buildLoadingThreadFromShell,
   buildThreadTurnInterruptInput,
@@ -5184,9 +5185,7 @@ function ChatViewContent(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
-                      ...(localDraftThread && Object.keys(localDraftThread.mcpOverrides).length > 0
-                        ? { initialMcpOverrides: localDraftThread.mcpOverrides }
-                        : {}),
+                      ...buildInitialMcpOverrides(localDraftThread?.mcpOverrides),
                     },
                   }
                 : {}),
