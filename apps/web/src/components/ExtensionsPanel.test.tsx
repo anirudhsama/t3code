@@ -254,4 +254,46 @@ describe("ExtensionsPanel", () => {
     expect(markup).toContain("Submit redirect");
     expect(markup).toContain('aria-label="Redirect URL for docs"');
   });
+
+  it("renders Claude host auth guidance and does not invent absent inventory counts", () => {
+    const value = snapshot();
+    const {
+      toolCount: _toolCount,
+      resourceCount: _resourceCount,
+      resourceTemplateCount: _resourceTemplateCount,
+      ...source
+    } = value.mcpServers[0]!;
+    const markup = renderToStaticMarkup(
+      <McpRow
+        server={{
+          ...source,
+          id: ProviderExtensionItemId.make("docs"),
+          name: "docs",
+          managed: false,
+          toggleable: true,
+          authStatus: "needs-auth",
+        }}
+        durable={false}
+        disabled={false}
+        pending={false}
+        authState={null}
+        callbackUrl=""
+        capabilities={{ ...value.capabilities.mcp, authenticate: false }}
+        onSet={() => {}}
+        onReconnect={() => {}}
+        onAuthenticate={() => {}}
+        onCopyAuthUrl={() => {}}
+        onCallbackUrlChange={() => {}}
+        onRelayCallback={() => {}}
+      />,
+    );
+
+    expect(markup).toContain(
+      "Authenticate with Claude Code on the machine running this T3 Code server.",
+    );
+    expect(markup).toContain("claude mcp login docs");
+    expect(markup).toContain("Inventory counts not reported.");
+    expect(markup).not.toContain(">Authenticate<");
+    expect(markup).not.toContain("0 resources");
+  });
 });

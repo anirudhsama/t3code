@@ -107,13 +107,13 @@ describe("extensions panel logic", () => {
     expect(source).toMatchObject({ threadOverride: "inherit", effectiveEnabled: true });
   });
 
-  it("labels an empty compose-time result as not started, never failed", () => {
+  it("shows measured compose-time failures and keeps unmeasured drafts not started", () => {
     const server = {
       ...snapshot().mcpServers[0]!,
       startupStatus: "failed" as const,
       statusObserved: true,
     };
-    expect(mcpStatusLabel(server, false)).toBe("Not started");
+    expect(mcpStatusLabel(server, false)).toBe("Failed");
     expect(mcpStatusLabel({ ...server, startupStatus: "unknown" }, false)).toBe("Not started");
     expect(
       mcpStatusLabel({ ...server, startupStatus: "unknown", statusObserved: false }, false),

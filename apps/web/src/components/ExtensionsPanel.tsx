@@ -72,6 +72,13 @@ interface ExtensionsPanelProps {
   ) => void;
 }
 
+function claudeMcpLoginCommand(serverName: string): string {
+  const argument = /^[A-Za-z0-9._-]+$/.test(serverName)
+    ? serverName
+    : `'${serverName.replaceAll("'", `'\\''`)}'`;
+  return `claude mcp login ${argument}`;
+}
+
 function errorMessage(value: unknown, fallback: string): string {
   return value instanceof Error && value.message.trim() ? value.message : fallback;
 }
@@ -274,6 +281,11 @@ export const McpRow = memo(function McpRow(props: {
                 <p className="text-xs text-destructive-foreground">{props.authState.message}</p>
               ) : null}
             </div>
+          ) : props.server.authStatus === "needs-auth" ? (
+            <div className="mt-2 space-y-1 text-[.68rem] leading-relaxed text-muted-foreground">
+              <p>Authenticate with Claude Code on the machine running this T3 Code server.</p>
+              <p className="font-mono">{claudeMcpLoginCommand(props.server.name)}</p>
+            </div>
           ) : null}
           <details className="mt-2 text-[.68rem] text-muted-foreground">
             <summary className="cursor-pointer select-none hover:text-foreground">Details</summary>
@@ -298,8 +310,19 @@ export const McpRow = memo(function McpRow(props: {
               {info ? <p>Server: {info}</p> : null}
               {props.server.statusObserved ? (
                 <p>
-                  {props.server.toolCount} tools · {props.server.resourceCount} resources ·{" "}
-                  {props.server.resourceTemplateCount} templates
+                  {[
+                    props.server.toolCount === undefined
+                      ? undefined
+                      : `${props.server.toolCount} tools`,
+                    props.server.resourceCount === undefined
+                      ? undefined
+                      : `${props.server.resourceCount} resources`,
+                    props.server.resourceTemplateCount === undefined
+                      ? undefined
+                      : `${props.server.resourceTemplateCount} templates`,
+                  ]
+                    .filter((count): count is string => count !== undefined)
+                    .join(" · ") || "Inventory counts not reported."}
                 </p>
               ) : (
                 <p>

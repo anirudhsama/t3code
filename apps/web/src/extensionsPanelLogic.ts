@@ -77,7 +77,7 @@ export function mcpStatusLabel(
     case "starting":
       return "Starting";
     case "failed":
-      return durable ? "Failed" : "Not started";
+      return "Failed";
     case "cancelled":
       return "Stopped";
     case "disabled":

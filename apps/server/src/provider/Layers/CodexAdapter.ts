@@ -2672,6 +2672,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
     const statuses = new Map(liveStatuses.items);
     const notifications = mcpNotificationStatus.get(input.threadId);
+    const runtimeStarted =
+      sessions.get(input.threadId)?.started === true || input.resumeCursor !== undefined;
     const items = definitions.items.map((definition) => {
       const baseStatus =
         statuses.get(definition.name) ?? emptyCodexMcpLiveStatus(definition.providerEnabled);
@@ -2679,9 +2681,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...baseStatus,
         ...notifications?.get(definition.name),
       };
+      const measuredStatus =
+        !runtimeStarted && status.startupStatus === "failed"
+          ? { ...status, startupStatus: "unknown" as const, error: undefined }
+          : status;
       return {
         ...definition,
-        ...status,
+        ...measuredStatus,
       } satisfies ProviderMcpInventoryItem;
     });
     return {

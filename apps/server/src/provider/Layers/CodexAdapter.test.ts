@@ -2205,6 +2205,25 @@ it.effect("overlays MCP live status notifications without polling", () => {
       const runtime = runtimeFactory.lastRuntime;
       NodeAssert.ok(runtime);
       yield* runtime.emit({
+        id: asEventId("evt-mcp-draft-failed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "mcpServer/startupStatus/updated",
+        payload: {
+          name: "docs",
+          status: "failed",
+          error: "global pre-thread status is not attributable",
+          failureReason: null,
+        },
+      });
+      yield* Effect.yieldNow;
+      const unmeasuredDraft = yield* adapter.extensions.mcp!.inventory(input);
+      NodeAssert.equal(unmeasuredDraft.items[0]?.startupStatus, "unknown");
+      NodeAssert.equal(unmeasuredDraft.items[0]?.error, undefined);
+
+      yield* runtime.emit({
         id: asEventId("evt-mcp-ready"),
         kind: "notification",
         provider: ProviderDriverKind.make("codex"),
