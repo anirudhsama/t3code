@@ -4961,6 +4961,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         existing.resumeLaunchIdentity === requestedResumeIdentity)
     )
       return existing;
+    if (existing && !existing.stopped && (existing.starting || existing.started)) {
+      // Inventory is observational once a provider session is active. Session/workspace
+      // replacement belongs to the normal start path; discovery must not tear down a live Query.
+      return existing;
+    }
     if (existing && !existing.stopped) {
       skillInventoryCache.delete(skillCacheKey(existing));
       yield* stopSessionInternal(existing, { emitExitEvent: false });
@@ -5009,17 +5014,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return joinClaudeSkillCatalog(response.skills, candidates);
   });
 
-  const readSkillInventory: ProviderExtensionSkillsFacet["inventory"] = Effect.fn(
-    "ClaudeAdapter.readSkillInventory",
-  )(function* (input: Parameters<NonNullable<ProviderExtensionsShape["skills"]>["inventory"]>[0]) {
+  const readSkillInventoryAttempt: (
+    input: Parameters<NonNullable<ProviderExtensionsShape["skills"]>["inventory"]>[0],
+    retryContextChange: boolean,
+    coalesceInFlight: boolean,
+  ) => Effect.Effect<
+    ProviderExtensionInventoryResult<ProviderSkillInventoryItem>,
+    ProviderAdapterError
+  > = Effect.fnUntraced(function* (input, retryContextChange, coalesceInFlight) {
     const context = yield* ensureExtensionContext(input);
     const key = skillCacheKey(context);
+    const requestStartRevision = inventoryRevision;
     if (!input.forceReload) {
       const cached = skillInventoryCache.get(key);
       if (cached) return cached;
-      const pending = skillInventoryInFlight.get(key);
-      if (pending) return yield* Deferred.await(pending);
     }
+    const pending = skillInventoryInFlight.get(key);
+    if (pending && (!input.forceReload || coalesceInFlight)) return yield* Deferred.await(pending);
     const deferred = yield* Deferred.make<
       ProviderExtensionInventoryResult<ProviderSkillInventoryItem>,
       ProviderAdapterError
@@ -5049,13 +5060,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
     if (sessions.get(context.session.threadId) !== context || context.stopped) {
+      if (skillInventoryInFlight.get(key) === deferred) skillInventoryInFlight.delete(key);
+      if (retryContextChange) {
+        const current = sessions.get(context.session.threadId);
+        if (current && !current.stopped) {
+          const currentKey = skillCacheKey(current);
+          const currentCached = skillInventoryCache.get(currentKey);
+          if (currentCached && currentCached.revision > requestStartRevision) {
+            yield* Deferred.succeed(deferred, currentCached);
+            return currentCached;
+          }
+          const currentPending = skillInventoryInFlight.get(currentKey);
+          const retried = yield* (
+            currentPending
+              ? Deferred.await(currentPending)
+              : readSkillInventoryAttempt(input, false, true)
+          ).pipe(Effect.exit);
+          yield* Deferred.done(deferred, retried);
+          return yield* retried;
+        }
+      }
       const error = new ProviderAdapterRequestError({
         provider: PROVIDER,
         method: "reloadSkills",
         detail: "The Claude skill inventory context changed before the request completed.",
       });
       yield* Deferred.fail(deferred, error);
-      if (skillInventoryInFlight.get(key) === deferred) skillInventoryInFlight.delete(key);
       return yield* error;
     }
     if (Exit.isFailure(loaded)) {
@@ -5073,6 +5103,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (skillInventoryInFlight.get(key) === deferred) skillInventoryInFlight.delete(key);
     return result;
   });
+
+  const readSkillInventory: ProviderExtensionSkillsFacet["inventory"] = Effect.fn(
+    "ClaudeAdapter.readSkillInventory",
+  )((input) => readSkillInventoryAttempt(input, true, false));
 
   const readMcpInventory: ProviderExtensionMcpFacet["inventory"] = Effect.fn(
     "ClaudeAdapter.readMcpInventory",

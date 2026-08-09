@@ -4639,6 +4639,189 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("does not let project discovery replace a worktree first-turn query", () => {
+    const harness = makeHarness({ queryFactory: () => new FakeClaudeQuery() });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.extensions.skills!.inventory({
+        threadId: THREAD_ID,
+        cwd: "/tmp/claude-adapter-test",
+      });
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-adapter-test/.t3/worktrees/new-thread",
+      });
+
+      const preparedQuery = harness.queries[0]!;
+      const firstTurnQuery = harness.queries[1]!;
+      assert.equal(preparedQuery.closeCalls, 1);
+      yield* adapter.extensions.skills!.inventory({
+        threadId: THREAD_ID,
+        cwd: "/tmp/claude-adapter-test",
+        forceReload: true,
+      });
+
+      assert.equal(harness.queries.length, 2);
+      assert.equal(firstTurnQuery.closeCalls, 0);
+      assert.equal(firstTurnQuery.reloadSkillsCalls, 1);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("retries an in-flight skill reload once against its replacement context", () => {
+    let releaseOld!: () => void;
+    const oldGate = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    let markOldStarted!: () => void;
+    const oldStarted = new Promise<void>((resolve) => {
+      markOldStarted = resolve;
+    });
+    let releaseFresh!: () => void;
+    const freshGate = new Promise<void>((resolve) => {
+      releaseFresh = resolve;
+    });
+    let markFreshStarted!: () => void;
+    const freshStarted = new Promise<void>((resolve) => {
+      markFreshStarted = resolve;
+    });
+    let queryIndex = 0;
+    const harness = makeHarness({
+      queryFactory: () => {
+        const query = new FakeClaudeQuery();
+        const index = queryIndex++;
+        query.skills = [
+          {
+            name: "context-skill",
+            description: index === 0 ? "Stale catalog." : "Fresh catalog.",
+            argumentHint: "",
+          },
+        ];
+        if (index === 0) {
+          query.reloadSkillsImpl = async () => {
+            markOldStarted();
+            await oldGate;
+            return { skills: query.skills };
+          };
+        } else {
+          query.reloadSkillsImpl = async () => {
+            markFreshStarted();
+            await freshGate;
+            return { skills: query.skills };
+          };
+        }
+        return query;
+      },
+    });
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const first = yield* adapter.extensions
+        .skills!.inventory({
+          threadId: THREAD_ID,
+          cwd: "/tmp/claude-adapter-test",
+        })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => oldStarted);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-adapter-test/.t3/worktrees/new-thread",
+      });
+      const currentRefresh = yield* adapter.extensions
+        .skills!.refresh({
+          threadId: THREAD_ID,
+          cwd: "/tmp/claude-adapter-test/.t3/worktrees/new-thread",
+        })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => freshStarted);
+      releaseOld();
+      yield* Effect.yieldNow;
+      releaseFresh();
+
+      const [firstResult, currentResult] = yield* Effect.all([
+        Fiber.join(first),
+        Fiber.join(currentRefresh),
+      ]);
+      assert.deepEqual(firstResult, currentResult);
+      assert.equal(firstResult.items[0]?.description, "Fresh catalog.");
+      assert.deepEqual(
+        harness.queries.map((query) => query.reloadSkillsCalls),
+        [1, 1],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("surfaces a replacement-context skill reload failure without retrying again", () => {
+    let releaseOld!: () => void;
+    const oldGate = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    let markOldStarted!: () => void;
+    const oldStarted = new Promise<void>((resolve) => {
+      markOldStarted = resolve;
+    });
+    let queryIndex = 0;
+    const harness = makeHarness({
+      queryFactory: () => {
+        const query = new FakeClaudeQuery();
+        const index = queryIndex++;
+        query.reloadSkillsImpl =
+          index === 0
+            ? async () => {
+                markOldStarted();
+                await oldGate;
+                return { skills: query.skills };
+              }
+            : async () => Promise.reject(new Error("fresh reload failed"));
+        return query;
+      },
+    });
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const inventory = yield* adapter.extensions
+        .skills!.inventory({
+          threadId: THREAD_ID,
+          cwd: "/tmp/claude-adapter-test",
+        })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Effect.promise(() => oldStarted);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-adapter-test/.t3/worktrees/new-thread",
+      });
+      releaseOld();
+
+      const result = yield* Fiber.join(inventory);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(result.failure._tag, "ProviderAdapterRequestError");
+        assert.include(result.failure.message, "reloadSkills failed");
+        assert.notInclude(result.failure.message, "context changed");
+      }
+      assert.deepEqual(
+        harness.queries.map((query) => query.reloadSkillsCalls),
+        [1, 1],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("recreates a prepared query when first-turn model options are not adoptable", () => {
     const harness = makeHarness({ queryFactory: () => new FakeClaudeQuery() });
     return Effect.gen(function* () {
