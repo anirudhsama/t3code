@@ -22,6 +22,10 @@ describe("mobile command metadata", () => {
     expect(metadata.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
+  it("reuses a provisional thread id for draft preview handoff", () => {
+    expect(makeTurnCommandMetadata("preview-thread").threadId).toBe("preview-thread");
+  });
+
   it("creates ids and timestamps for queued messages", () => {
     const metadata = makeQueuedMessageMetadata();
 

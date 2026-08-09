@@ -7,11 +7,11 @@ export interface TurnCommandMetadata {
   readonly createdAt: string;
 }
 
-export function makeTurnCommandMetadata(): TurnCommandMetadata {
+export function makeTurnCommandMetadata(threadId = uuidv4()): TurnCommandMetadata {
   return {
     commandId: uuidv4(),
     messageId: uuidv4(),
-    threadId: uuidv4(),
+    threadId,
     createdAt: new Date().toISOString(),
   };
 }
