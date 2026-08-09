@@ -32,6 +32,7 @@ import { memo, useCallback, useDeferredValue, useEffect, useMemo, useState } fro
 import {
   advanceMcpAuthState,
   applyDraftMcpOverrides,
+  createMcpAuthWaitingState,
   effectiveMcpOriginLabel,
   extensionPending,
   extensionRetryTarget,
@@ -63,7 +64,7 @@ interface ExtensionsPanelProps {
   durable: boolean;
   activeTurn: boolean;
   draftMcpOverrides: ProviderMcpOverrides;
-  canOpenAuthLocally: boolean;
+  isAuthClientLocal: boolean;
   skillsCollapsed?: boolean;
   onSetDraftMcpOverride: (
     mcpServerId: ProviderMcpServer["id"],
@@ -127,27 +128,27 @@ const SkillRow = memo(function SkillRow({ skill }: { skill: ProviderSkill }) {
   );
 });
 
-const McpRow = memo(function McpRow(props: {
+export const McpRow = memo(function McpRow(props: {
   server: ProviderMcpServer;
   durable: boolean;
   disabled: boolean;
   pending: boolean;
   authState: McpAuthUiState | null;
-  canOpenAuthLocally: boolean;
+  callbackUrl: string;
   capabilities: ThreadExtensionsSnapshot["capabilities"]["mcp"];
   onSet: (server: ProviderMcpServer, state: ProviderExtensionOverrideState) => void;
   onReconnect: (server: ProviderMcpServer) => void;
   onAuthenticate: (server: ProviderMcpServer) => void;
   onCopyAuthUrl: (url: string) => void;
+  onCallbackUrlChange: (value: string) => void;
+  onRelayCallback: (server: ProviderMcpServer) => void;
 }) {
   const status = mcpStatusLabel(props.server, props.durable);
   const info = serverInfoLabel(props.server.serverInfo);
   const authPending =
     props.authState?.phase === "beginning" || props.authState?.phase === "waiting";
   const authUrl =
-    props.authState?.phase === "waiting" || props.authState?.phase === "error"
-      ? props.authState.authorizationUrl
-      : undefined;
+    props.authState?.phase === "waiting" ? props.authState.authorizationUrl : undefined;
   return (
     <div
       className="rounded-lg border border-border/65 bg-card/45 px-3 py-2.5"
@@ -199,24 +200,74 @@ const McpRow = memo(function McpRow(props: {
                     ? "Waiting for login…"
                     : "Authenticate"}
               </Button>
-              {!props.canOpenAuthLocally ? (
-                <p className="text-[.68rem] leading-relaxed text-muted-foreground">
-                  Login must be completed from the machine running this T3 Code server.
-                </p>
-              ) : null}
-              {!props.canOpenAuthLocally && authUrl ? (
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <code className="min-w-0 flex-1 truncate rounded bg-muted px-1.5 py-1 text-[.65rem]">
-                    {authUrl}
-                  </code>
+              {authUrl ? (
+                <div className="flex items-center gap-1.5">
+                  <p className="min-w-0 flex-1 text-[.68rem] leading-relaxed text-muted-foreground">
+                    Complete authentication in the browser that opened.
+                  </p>
                   <Button
-                    size="icon-xs"
+                    size="xs"
                     variant="outline"
                     aria-label={`Copy authentication URL for ${props.server.name}`}
                     onClick={() => props.onCopyAuthUrl(authUrl)}
                   >
                     <Clipboard />
+                    Copy login URL
                   </Button>
+                </div>
+              ) : null}
+              {props.authState?.phase === "waiting" && props.authState.pasteVisible ? (
+                <div className="space-y-1.5 rounded-md border border-border/65 bg-muted/30 p-2">
+                  <p className="text-[.68rem] font-medium text-foreground/80">
+                    Paste the redirect URL
+                  </p>
+                  <p className="text-[.68rem] leading-relaxed text-muted-foreground">
+                    After authorizing, copy the full 127.0.0.1 redirect URL from the browser address
+                    bar and paste it here.
+                  </p>
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <Input
+                      nativeInput
+                      size="sm"
+                      type="url"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={props.callbackUrl}
+                      onChange={(event) => props.onCallbackUrlChange(event.currentTarget.value)}
+                      placeholder="http://127.0.0.1:…/callback/…?code=…"
+                      aria-label={`Redirect URL for ${props.server.name}`}
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={
+                        props.callbackUrl.trim().length === 0 ||
+                        props.authState.relayState === "submitting"
+                      }
+                      onClick={() => props.onRelayCallback(props.server)}
+                    >
+                      {props.authState.relayState === "submitting"
+                        ? "Sending…"
+                        : props.authState.relayState === "submitted"
+                          ? "Send again"
+                          : "Submit redirect"}
+                    </Button>
+                  </div>
+                  {props.authState.relayState === "submitted" ? (
+                    <p className="text-[.68rem] text-muted-foreground">
+                      Redirect sent. Waiting for the provider to finish login…
+                    </p>
+                  ) : null}
+                  {props.authState.openError ? (
+                    <p className="text-xs text-destructive-foreground">
+                      {props.authState.openError}
+                    </p>
+                  ) : null}
+                  {props.authState.relayError ? (
+                    <p className="text-xs text-destructive-foreground">
+                      {props.authState.relayError}
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
               {props.authState?.phase === "error" ? (
@@ -308,6 +359,7 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
   const [mutationRevision, setMutationRevision] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [authStates, setAuthStates] = useState<Readonly<Record<string, McpAuthUiState>>>({});
+  const [callbackUrls, setCallbackUrls] = useState<Readonly<Record<string, string>>>({});
   const setMcpOverride = useAtomCommand(threadEnvironment.setMcpOverride, { reportFailure: false });
   const refresh = useAtomCommand(extensionsEnvironment.refresh, { reportFailure: false });
   const refreshPreview = useAtomCommand(extensionsEnvironment.refreshPreview, {
@@ -315,6 +367,27 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
   });
   const reconnectMcp = useAtomCommand(extensionsEnvironment.reconnectMcp, { reportFailure: false });
   const beginMcpAuth = useAtomCommand(extensionsEnvironment.beginMcpAuth, { reportFailure: false });
+  const relayMcpAuthCallback = useAtomCommand(extensionsEnvironment.relayMcpAuthCallback, {
+    reportFailure: false,
+  });
+
+  useEffect(() => {
+    const delayed = Object.entries(authStates).filter(
+      ([, state]) => state.phase === "waiting" && !state.pasteVisible,
+    );
+    if (delayed.length === 0) return;
+    const timeout = window.setTimeout(() => {
+      setAuthStates((current) => {
+        const next = { ...current };
+        for (const [serverId] of delayed) {
+          const state = next[serverId];
+          if (state?.phase === "waiting") next[serverId] = { ...state, pasteVisible: true };
+        }
+        return next;
+      });
+    }, 4_000);
+    return () => window.clearTimeout(timeout);
+  }, [authStates]);
 
   useEffect(() => {
     if (mutationRevision !== null && (props.snapshot?.overrideRevision ?? 0) >= mutationRevision) {
@@ -472,6 +545,7 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
       if (!props.durable && (!props.projectId || !props.providerInstanceId)) return;
       setActionError(null);
       setAuthStates((current) => ({ ...current, [server.id]: { phase: "beginning" } }));
+      setCallbackUrls((current) => ({ ...current, [server.id]: "" }));
       const result = await beginMcpAuth({
         environmentId: props.environmentId,
         input: {
@@ -510,42 +584,110 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
       }
       setAuthStates((current) => ({
         ...current,
-        [server.id]: {
-          phase: "waiting",
+        [server.id]: createMcpAuthWaitingState({
           authorizationUrl,
+          localClient: props.isAuthClientLocal,
           ...(server.error ? { baselineError: server.error } : {}),
-        },
+        }),
       }));
-      if (props.canOpenAuthLocally) {
-        try {
-          const localApi = readLocalApi();
-          if (localApi) {
-            await localApi.shell.openExternal(authorizationUrl);
-          } else {
-            const opened = window.open(authorizationUrl, "_blank", "noopener,noreferrer");
-            if (!opened) throw new Error("The browser blocked the login window.");
-          }
-        } catch (error) {
-          setAuthStates((current) => ({
-            ...current,
-            [server.id]: {
-              phase: "error",
-              message: errorMessage(error, `Could not open authentication for ${server.name}.`),
-              authorizationUrl,
-            },
-          }));
-        }
+      try {
+        const localApi = readLocalApi();
+        if (!localApi) throw new Error("The external-link handler is unavailable.");
+        await localApi.shell.openExternal(authorizationUrl);
+      } catch (error) {
+        setAuthStates((current) => {
+          const state = current[server.id];
+          return state?.phase === "waiting"
+            ? {
+                ...current,
+                [server.id]: {
+                  ...state,
+                  pasteVisible: true,
+                  openError: errorMessage(
+                    error,
+                    `Could not open authentication for ${server.name}.`,
+                  ),
+                },
+              }
+            : current;
+        });
       }
     },
     [
       authStates,
       beginMcpAuth,
-      props.canOpenAuthLocally,
+      props.durable,
+      props.environmentId,
+      props.projectId,
+      props.providerInstanceId,
+      props.isAuthClientLocal,
+      props.threadId,
+    ],
+  );
+
+  const relayCallback = useCallback(
+    async (server: ProviderMcpServer) => {
+      const callbackUrl = callbackUrls[server.id]?.trim() ?? "";
+      const state = authStates[server.id];
+      if (!callbackUrl || state?.phase !== "waiting" || state.relayState === "submitting") return;
+      if (!props.durable && (!props.projectId || !props.providerInstanceId)) return;
+      setAuthStates((current) => {
+        const currentState = current[server.id];
+        if (currentState?.phase !== "waiting") return current;
+        const { relayError: _relayError, ...waiting } = currentState;
+        return {
+          ...current,
+          [server.id]: { ...waiting, relayState: "submitting" },
+        };
+      });
+      const result = await relayMcpAuthCallback({
+        environmentId: props.environmentId,
+        input: {
+          threadId: props.threadId,
+          mcpServerId: server.id,
+          callbackUrl,
+          ...(!props.durable
+            ? {
+                projectId: props.projectId!,
+                providerInstanceId: props.providerInstanceId!,
+              }
+            : {}),
+        },
+      });
+      setAuthStates((current) => {
+        const currentState = current[server.id];
+        if (currentState?.phase !== "waiting") return current;
+        const { relayState: _relayState, relayError: _relayError, ...waiting } = currentState;
+        if (result._tag === "Failure" && isAtomCommandInterrupted(result)) {
+          return {
+            ...current,
+            [server.id]: waiting,
+          };
+        }
+        return {
+          ...current,
+          [server.id]:
+            result._tag === "Failure"
+              ? {
+                  ...waiting,
+                  relayError: errorMessage(
+                    squashAtomCommandFailure(result),
+                    "Could not submit the redirect URL.",
+                  ),
+                }
+              : { ...waiting, relayState: "submitted" },
+        };
+      });
+    },
+    [
+      authStates,
+      callbackUrls,
       props.durable,
       props.environmentId,
       props.projectId,
       props.providerInstanceId,
       props.threadId,
+      relayMcpAuthCallback,
     ],
   );
 
@@ -701,12 +843,16 @@ export function ExtensionsPanel(props: ExtensionsPanelProps) {
                         : props.draftMcpOverrides[server.id] !== undefined
                     }
                     authState={authStates[server.id] ?? null}
-                    canOpenAuthLocally={props.canOpenAuthLocally}
+                    callbackUrl={callbackUrls[server.id] ?? ""}
                     capabilities={props.snapshot!.capabilities.mcp}
                     onSet={(target, state) => void setMcp(target, state)}
                     onReconnect={(target) => void reconnect(target)}
                     onAuthenticate={(target) => void authenticate(target)}
                     onCopyAuthUrl={copyAuthUrl}
+                    onCallbackUrlChange={(value) =>
+                      setCallbackUrls((current) => ({ ...current, [server.id]: value }))
+                    }
+                    onRelayCallback={(target) => void relayCallback(target)}
                   />
                 ))}
                 {filteredMcp.length === 0 ? (

@@ -42,14 +42,15 @@ calls, or other history already recorded in the thread.
 ## MCP authentication
 
 When discovery reports **Login required**, select **Authenticate**. T3 Code starts the provider's
-login flow, opens it in a browser when the client is running locally with the server, and shows
-**Waiting for login** until the provider reports completion. A failed or timed-out login remains
-retryable from the same row.
+login flow in your browser and shows **Waiting for login** until the provider reports completion. A
+failed or timed-out login remains retryable from the same row.
 
-The login callback is bound to the server machine's loopback interface. Remote, relay, and tunnel
-clients therefore do not open the authorization URL automatically. Complete login from the machine
-running the T3 Code server; after the URL is created, the panel makes it available to copy for
-someone on that machine.
+When you connect remotely, the provider may finish on a `127.0.0.1` page that your browser cannot
+reach. Copy that page's full URL from the browser address bar, including its query string, paste it
+into **Paste the redirect URL** in the MCP row, and select **Submit redirect**. T3 Code securely
+delivers that callback to the server machine. Local clients reveal the same paste-back control after
+a few seconds if the automatic callback does not finish. The row also offers **Copy login URL** if
+you need to reopen the provider's authorization page.
 
 ## Selecting skills in the composer
 

@@ -146,7 +146,7 @@ import {
 import { RightPanelTabs } from "./RightPanelTabs";
 import { AgentsPanel } from "./AgentsPanel";
 import { ExtensionsPanel } from "./ExtensionsPanel";
-import { canOpenMcpAuthOnClient } from "~/extensionsPanelLogic";
+import { isMcpAuthClientLocal } from "~/extensionsPanelLogic";
 import {
   deriveAgentPanelModel,
   foldSubagentActivities,
@@ -1739,9 +1739,9 @@ function ChatViewContent(props: ChatViewProps) {
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
-  const canOpenMcpAuthLocally =
+  const isMcpAuthLocalClient =
     activeEnvironment !== null &&
-    canOpenMcpAuthOnClient({
+    isMcpAuthClientLocal({
       target: activeEnvironment.entry.target,
       electron: isElectron,
       hostname: typeof window === "undefined" ? "" : window.location.hostname,
@@ -6048,7 +6048,7 @@ function ChatViewContent(props: ChatViewProps) {
         projectId={activeProject?.id ?? null}
         providerInstanceId={activeProviderInstanceId}
         draftMcpOverrides={localDraftThread?.mcpOverrides ?? {}}
-        canOpenAuthLocally={canOpenMcpAuthLocally}
+        isAuthClientLocal={isMcpAuthLocalClient}
         onSetDraftMcpOverride={(mcpServerId, state) => {
           if (!composerDraftTarget || isServerThread) return;
           setDraftMcpOverride(composerDraftTarget, mcpServerId, state);

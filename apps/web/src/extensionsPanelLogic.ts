@@ -12,12 +12,28 @@ export type McpAuthUiState =
       readonly phase: "waiting";
       readonly authorizationUrl: string;
       readonly baselineError?: string;
+      readonly pasteVisible: boolean;
+      readonly openError?: string;
+      readonly relayState?: "submitting" | "submitted";
+      readonly relayError?: string;
     }
   | {
       readonly phase: "error";
       readonly message: string;
-      readonly authorizationUrl?: string;
     };
+
+export function createMcpAuthWaitingState(input: {
+  readonly authorizationUrl: string;
+  readonly localClient: boolean;
+  readonly baselineError?: string;
+}): Extract<McpAuthUiState, { readonly phase: "waiting" }> {
+  return {
+    phase: "waiting",
+    authorizationUrl: input.authorizationUrl,
+    pasteVisible: !input.localClient,
+    ...(input.baselineError ? { baselineError: input.baselineError } : {}),
+  };
+}
 
 export function applyDraftMcpOverrides(
   servers: readonly ProviderMcpServer[],
@@ -82,7 +98,6 @@ export function advanceMcpAuthState(
       state: {
         phase: "error",
         message: server.error,
-        authorizationUrl: state.authorizationUrl,
       },
       refresh: false,
     };
@@ -100,7 +115,7 @@ function isLoopbackHostname(hostname: string): boolean {
   );
 }
 
-export function canOpenMcpAuthOnClient(input: {
+export function isMcpAuthClientLocal(input: {
   readonly target:
     | { readonly _tag: "PrimaryConnectionTarget" }
     | { readonly _tag: "BearerConnectionTarget"; readonly connectionId: string }

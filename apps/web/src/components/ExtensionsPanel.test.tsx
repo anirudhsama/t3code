@@ -11,7 +11,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { describe, expect, it } from "vite-plus/test";
 
-import { ExtensionsPanel } from "./ExtensionsPanel";
+import { ExtensionsPanel, McpRow } from "./ExtensionsPanel";
 import { useRightPanelStore } from "../rightPanelStore";
 
 const environmentId = EnvironmentId.make("environment-local");
@@ -99,7 +99,7 @@ function render(
       durable={options?.durable ?? true}
       activeTurn={options?.activeTurn ?? false}
       draftMcpOverrides={{}}
-      canOpenAuthLocally={false}
+      isAuthClientLocal={false}
       {...(options?.skillsCollapsed === undefined
         ? {}
         : { skillsCollapsed: options.skillsCollapsed })}
@@ -208,12 +208,50 @@ describe("ExtensionsPanel", () => {
         durable={false}
         activeTurn={false}
         draftMcpOverrides={{ [ProviderExtensionItemId.make("docs")]: "disabled" }}
-        canOpenAuthLocally={false}
+        isAuthClientLocal={false}
         skillsCollapsed
         onSetDraftMcpOverride={() => {}}
       />,
     );
     expect(markup).not.toContain("Send the first message");
     expect(markup).toContain("Will apply when this thread is created");
+  });
+
+  it("shows remote paste-back instructions and keeps the login URL as a secondary action", () => {
+    const value = snapshot();
+    const server = {
+      ...value.mcpServers[0]!,
+      id: ProviderExtensionItemId.make("docs"),
+      name: "docs",
+      managed: false,
+      toggleable: true,
+      authStatus: "needs-auth" as const,
+    };
+    const markup = renderToStaticMarkup(
+      <McpRow
+        server={server}
+        durable
+        disabled={false}
+        pending={false}
+        authState={{
+          phase: "waiting",
+          authorizationUrl: "https://provider.example/authorize",
+          pasteVisible: true,
+        }}
+        callbackUrl="http://127.0.0.1:43123/callback/state?code=secret"
+        capabilities={value.capabilities.mcp}
+        onSet={() => {}}
+        onReconnect={() => {}}
+        onAuthenticate={() => {}}
+        onCopyAuthUrl={() => {}}
+        onCallbackUrlChange={() => {}}
+        onRelayCallback={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("Copy login URL");
+    expect(markup).toContain("copy the full 127.0.0.1 redirect URL");
+    expect(markup).toContain("Submit redirect");
+    expect(markup).toContain('aria-label="Redirect URL for docs"');
   });
 });

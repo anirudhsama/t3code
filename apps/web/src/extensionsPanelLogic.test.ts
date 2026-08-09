@@ -10,12 +10,13 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   advanceMcpAuthState,
   applyDraftMcpOverrides,
-  canOpenMcpAuthOnClient,
+  createMcpAuthWaitingState,
   extensionPending,
   extensionRetryTarget,
   filterExtensionMcpServers,
   filterExtensionSkills,
   mcpStatusLabel,
+  isMcpAuthClientLocal,
 } from "./extensionsPanelLogic";
 
 function snapshot(): ThreadExtensionsSnapshot {
@@ -127,6 +128,7 @@ describe("extensions panel logic", () => {
     const waiting = {
       phase: "waiting" as const,
       authorizationUrl: "https://example.test/login",
+      pasteVisible: true,
     };
     expect(advanceMcpAuthState(waiting, { ...server, authStatus: "authenticated" })).toEqual({
       state: null,
@@ -142,29 +144,40 @@ describe("extensions panel logic", () => {
       state: {
         phase: "error",
         message: "timed out waiting for OAuth callback",
-        authorizationUrl: "https://example.test/login",
       },
       refresh: false,
     });
   });
 
-  it("opens loopback auth only for host-local connection targets", () => {
+  it("reveals paste-back immediately for remote clients and delays the local fallback", () => {
     expect(
-      canOpenMcpAuthOnClient({
+      createMcpAuthWaitingState({
+        authorizationUrl: "https://example.test/login",
+        localClient: false,
+      }).pasteVisible,
+    ).toBe(true);
+    expect(
+      createMcpAuthWaitingState({
+        authorizationUrl: "https://example.test/login",
+        localClient: true,
+      }).pasteVisible,
+    ).toBe(false);
+    expect(
+      isMcpAuthClientLocal({
         target: { _tag: "PrimaryConnectionTarget" },
         electron: false,
         hostname: "127.0.0.1",
       }),
     ).toBe(true);
     expect(
-      canOpenMcpAuthOnClient({
+      isMcpAuthClientLocal({
         target: { _tag: "RelayConnectionTarget" },
         electron: true,
         hostname: "localhost",
       }),
     ).toBe(false);
     expect(
-      canOpenMcpAuthOnClient({
+      isMcpAuthClientLocal({
         target: { _tag: "PrimaryConnectionTarget" },
         electron: false,
         hostname: "app.t3.codes",
