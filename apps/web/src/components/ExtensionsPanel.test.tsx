@@ -296,4 +296,33 @@ describe("ExtensionsPanel", () => {
     expect(markup).not.toContain(">Authenticate<");
     expect(markup).not.toContain("0 resources");
   });
+
+  it("uses singular inventory count labels", () => {
+    const value = snapshot();
+    const markup = renderToStaticMarkup(
+      <McpRow
+        server={{
+          ...value.mcpServers[0]!,
+          toolCount: 1,
+          resourceCount: 1,
+          resourceTemplateCount: 1,
+        }}
+        durable
+        disabled={false}
+        pending={false}
+        authState={null}
+        callbackUrl=""
+        capabilities={value.capabilities.mcp}
+        onSet={() => {}}
+        onReconnect={() => {}}
+        onAuthenticate={() => {}}
+        onCopyAuthUrl={() => {}}
+        onCallbackUrlChange={() => {}}
+        onRelayCallback={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("1 tool · 1 resource · 1 template");
+    expect(markup).not.toContain("1 tools");
+  });
 });

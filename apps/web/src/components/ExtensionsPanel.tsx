@@ -79,6 +79,10 @@ function claudeMcpLoginCommand(serverName: string): string {
   return `claude mcp login ${argument}`;
 }
 
+function inventoryCount(value: number | undefined, singular: string): string | undefined {
+  return value === undefined ? undefined : `${value} ${value === 1 ? singular : `${singular}s`}`;
+}
+
 function errorMessage(value: unknown, fallback: string): string {
   return value instanceof Error && value.message.trim() ? value.message : fallback;
 }
@@ -311,15 +315,9 @@ export const McpRow = memo(function McpRow(props: {
               {props.server.statusObserved ? (
                 <p>
                   {[
-                    props.server.toolCount === undefined
-                      ? undefined
-                      : `${props.server.toolCount} tools`,
-                    props.server.resourceCount === undefined
-                      ? undefined
-                      : `${props.server.resourceCount} resources`,
-                    props.server.resourceTemplateCount === undefined
-                      ? undefined
-                      : `${props.server.resourceTemplateCount} templates`,
+                    inventoryCount(props.server.toolCount, "tool"),
+                    inventoryCount(props.server.resourceCount, "resource"),
+                    inventoryCount(props.server.resourceTemplateCount, "template"),
                   ]
                     .filter((count): count is string => count !== undefined)
                     .join(" · ") || "Inventory counts not reported."}
