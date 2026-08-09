@@ -11,7 +11,8 @@ worktree attached to the thread. User and system skills remain available alongsi
 
 The panel groups skills by their source and shows where each skill came from. MCP servers include
 their configuration provenance, startup and authentication status, and reported tool and resource
-counts after discovery has run. Opening the panel before the first message runs discovery once and
+counts after discovery has run. A provider that does not report a count leaves it blank rather than
+showing a misleading zero. Opening the panel before the first message runs discovery once and
 caches the result; use **Refresh** after changing provider-owned MCP configuration.
 
 ## Skills
@@ -52,6 +53,10 @@ delivers that callback to the server machine. Local clients reveal the same past
 a few seconds if the automatic callback does not finish. The row also offers **Copy login URL** if
 you need to reopen the provider's authorization page.
 
+Claude authentication remains owned by Claude Code on the server host. For a Claude MCP row marked
+**Login required**, run the command shown in the row (`claude mcp login <server>`) on that machine,
+then refresh the panel. T3 Code does not offer an Authenticate button for Claude.
+
 ## Selecting skills in the composer
 
 Type `$` in the composer to select an available skill for the next message. Selected skills appear as
@@ -64,7 +69,9 @@ skill.
 
 ## Provider availability
 
-The panel follows provider capabilities. Codex supports contextual skill and MCP inventory and
-thread overrides. Providers that do not yet expose those capabilities remain usable for chat, but
-their unsupported controls are not enabled. Claude support is planned as a follow-up using the same
-capability-based contracts.
+The panel follows provider capabilities. Codex and Claude support contextual skill and MCP inventory,
+live status, refresh, reconnect, and thread overrides. Claude reports MCP tool counts but does not
+report resource or resource-template counts. Its skill overrides are resolved by Claude's native
+skill name even though T3 Code preserves path-level identity for display and selection. Providers
+that do not expose these capabilities remain usable for chat, but their unsupported controls are not
+enabled.

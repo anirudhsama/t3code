@@ -34,15 +34,14 @@ inventory and status, refresh, thread overrides, reconnect, and authentication. 
 are represented by capabilities rather than provider-name checks. Providers without the facet keep
 their existing chat behavior.
 
-Raw inventory is cached at the provider boundary by canonical workspace and domain. Explicit
+Raw inventory is cached at the provider boundary by provider instance, thread, canonical workspace,
+and domain. Explicit
 refresh bypasses that cache. Provider notifications invalidate it and wake subscribers; there is no
 polling loop and no second long-lived management process alongside an active session.
 
-Draft snapshots use a prepared provider runtime and issue one global MCP status request without a
-provider thread ID. The result is cached until explicit refresh. A global null result means the
-server has not started (or is unavailable); it is not promoted to a failure because pre-thread
-discovery cannot distinguish those cases. After thread creation, only thread-scoped status is
-authoritative.
+Draft snapshots use a prepared provider runtime. Status labels are measurement-driven: a provider
+that can measure a failed draft runtime reports **Failed**, while an unmeasured pre-thread result
+remains **Not started**. After thread creation, only thread-scoped status is authoritative.
 
 ## Codex
 
@@ -62,6 +61,42 @@ timer; starting the first turn cancels it permanently for the now-durable sessio
 The composer sends selected skills as structured Codex input. The server validates the selected ID,
 name, path, and effective enabled state against current inventory immediately before the turn.
 
+## Claude
+
+Claude uses one streaming Agent SDK `Query` per thread or draft. Subscribing to preview inventory
+prepares that Query with the same canonical cwd, environment, executable, skill projection, dynamic
+MCP set, and resume identity as the first turn. The first turn adopts the prepared Query instead of
+replacing it. A management lease protects active inventory calls; after the final lease releases, an
+unprompted Query closes on the same 30-minute idle window. An immutable launch-identity change closes
+and recreates it.
+
+`reloadSkills()` is the catalog authority. The adapter joins that name-only SDK catalog to a
+read-only scan of the isolated config directory, cwd and parent project directories, additional and
+managed directories, and roots returned by `reloadPlugins()`. Canonical `SKILL.md` paths remain the
+T3 identity. Provider-native or otherwise unjoinable commands use a synthetic
+`claude:skill:<qualified-name>` identity and are labeled provider-resolved. Duplicate paths remain
+visible with provenance and `shadowedBy`, but only Claude's resolved winner can be selected.
+`commands_changed` invalidates and coalesces a fresh catalog load; the adapter never uses the SDK's
+initial `supportedCommands()` snapshot as live truth.
+
+Initial skill availability compiles into Query options. Idle changes use
+`applyFlagSettings({ skillOverrides })`; this SDK surface is name-granular, so path identity cannot
+make two same-name definitions independently selectable. Composer dispatch therefore force-refreshes
+inventory and rejects a selected shadowed path instead of translating it to the winner. Validated
+skills are invoked by their native slash name.
+
+Claude MCP inventory comes from `mcpServerStatus()`, one effective row per name. The status scope
+selects the effective provenance reconstructed read-only from user and local `.claude.json` entries,
+project `.mcp.json`, plugin roots, managed configuration, and T3-owned dynamic entries. File-backed
+servers use `toggleMcpServer`; only T3-owned dynamic entries use `setMcpServers`. The injected
+`t3-code` entry is visible, enabled, locked, and non-toggleable. Claude reports tools but not resource
+or resource-template counts, and MCP authentication remains display-only because login must run in
+Claude Code on the server host.
+
+Idle reconciliation calls these Query methods directly and advances the applied revision only after
+SDK success. Active turns retain the normal reactor coalescing and retryable failure state; Claude
+does not need Codex's restart-and-resume boundary.
+
 ## Persistence and scope
 
 Overrides belong to a thread, not a project, provider installation, or skill file. Restart recovery
@@ -77,6 +112,5 @@ entry is visible but never toggleable.
 
 ## Follow-up providers
 
-Codex is the first full implementation. Claude support is a planned follow-up on these same
-contracts and lifecycle; it is not implemented by this feature. Cursor, Grok, OpenCode, and any
-other adapter can opt into individual capabilities without changing orchestration or clients.
+Cursor, Grok, OpenCode, and any other adapter can opt into individual capabilities without changing
+orchestration or clients.
