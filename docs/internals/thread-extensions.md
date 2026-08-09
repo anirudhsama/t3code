@@ -85,13 +85,12 @@ make two same-name definitions independently selectable. Composer dispatch there
 inventory and rejects a selected shadowed path instead of translating it to the winner. Validated
 skills are invoked by their native slash name.
 
-Claude MCP inventory comes from `mcpServerStatus()`, one effective row per name. The status scope
-selects the effective provenance reconstructed read-only from user and local `.claude.json` entries,
-project `.mcp.json`, plugin roots, managed configuration, and T3-owned dynamic entries. File-backed
-servers use `toggleMcpServer`; only T3-owned dynamic entries use `setMcpServers`. The injected
-`t3-code` entry is visible, enabled, locked, and non-toggleable. Claude reports tools but not resource
-or resource-template counts, and MCP authentication remains display-only because login must run in
-Claude Code on the server host.
+Claude MCP inventory comes from `mcpServerStatus()`, one effective row per name. Each row exposes the
+single scope declared by the provider; T3-owned dynamic entries expose their adapter-owned runtime
+scope instead. File-backed servers use `toggleMcpServer`; only T3-owned dynamic entries use
+`setMcpServers`. The injected `t3-code` entry is visible, enabled, locked, and non-toggleable. Claude
+reports tools but not resource or resource-template counts, and MCP authentication remains
+display-only because login must run in Claude Code on the server host.
 
 Idle reconciliation calls these Query methods directly and advances the applied revision only after
 SDK success. Active turns retain the normal reactor coalescing and retryable failure state; Claude

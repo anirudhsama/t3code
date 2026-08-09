@@ -423,7 +423,6 @@ describe("ClaudeAdapterLive", () => {
         },
         { name: "account", status: "needs-auth", scope: "user" },
       ],
-      origins: [],
       dynamicNames: new Set(["t3-code"]),
     });
 
@@ -471,6 +470,14 @@ describe("ClaudeAdapterLive", () => {
         enabled: items[2]?.providerEnabled,
       },
       { managed: true, toggleable: false, enabled: true },
+    );
+    assert.deepEqual(
+      items.map((item) => item.origins),
+      [
+        [{ scope: "project", label: "Project", effective: true }],
+        [{ scope: "user", label: "User", effective: true }],
+        [{ scope: "system", label: "Runtime", effective: true }],
+      ],
     );
   });
 

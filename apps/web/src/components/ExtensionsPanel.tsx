@@ -315,7 +315,9 @@ export const McpRow = memo(function McpRow(props: {
             <div className="mt-1.5 space-y-1 border-l border-border pl-2">
               {props.server.origins.length > 0 ? (
                 <>
-                  <p>Defined in: {props.server.origins.map(originLabel).join(", ")}</p>
+                  {props.server.origins.length > 1 ? (
+                    <p>Defined in: {props.server.origins.map(originLabel).join(", ")}</p>
+                  ) : null}
                   <p>
                     Active:{" "}
                     {originLabel(

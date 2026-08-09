@@ -92,7 +92,6 @@ import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
-import { readClaudeMcpOrigins } from "../Drivers/ClaudeMcp.ts";
 import {
   claudeManagedSkillDirectories,
   scanClaudeSkillCandidates,
@@ -1413,10 +1412,6 @@ function sanitizeClaudeMcpError(error: string | undefined): string | undefined {
 
 export function mapClaudeMcpInventory(input: {
   readonly statuses: ReadonlyArray<McpServerStatus>;
-  readonly origins: ReadonlyArray<{
-    readonly name: string;
-    readonly origin: ProviderExtensionOrigin;
-  }>;
   readonly dynamicNames: ReadonlySet<string>;
 }): ReadonlyArray<ProviderMcpInventoryItem> {
   const statuses = [...input.statuses];
@@ -1430,23 +1425,6 @@ export function mapClaudeMcpInventory(input: {
     const winner = dynamic
       ? { scope: "system" as const, label: "Runtime" }
       : claudeMcpScope(status.scope);
-    const matchingOrigins = input.origins.filter((candidate) => candidate.name === status.name);
-    const matchingWinnerScope = matchingOrigins.filter(
-      ({ origin }) => origin.scope === winner.scope,
-    );
-    const configuredOrigins = matchingOrigins.map(({ origin }) => ({
-      ...origin,
-      effective:
-        origin.scope === winner.scope &&
-        (origin.label === winner.label ||
-          (status.scope === "plugin" && matchingWinnerScope.length === 1)),
-    }));
-    const hasWinner = configuredOrigins.some((origin) => origin.effective);
-    const origins: ProviderExtensionOrigin[] = dynamic
-      ? [{ scope: "system", label: "Runtime", effective: true }]
-      : hasWinner
-        ? configuredOrigins
-        : [...configuredOrigins, { scope: winner.scope, label: winner.label, effective: true }];
     const managed = status.name === "t3-code" && dynamic;
     const startupStatus: ProviderMcpInventoryItem["startupStatus"] =
       status.status === "connected"
@@ -1467,7 +1445,7 @@ export function mapClaudeMcpInventory(input: {
     return {
       id: ProviderExtensionItemId.make(status.name),
       name: status.name,
-      origins,
+      origins: [{ ...winner, effective: true }],
       providerEnabled: managed || status.status !== "disabled",
       managed,
       toggleable: !managed,
@@ -5119,25 +5097,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           try: () => context.query.initializationResult(),
           catch: (cause) => toRequestError(input.threadId, "initialize", cause),
         });
-        const plugins = yield* Effect.tryPromise({
-          try: () => context.query.reloadPlugins(),
-          catch: (cause) => toRequestError(input.threadId, "reloadPlugins", cause),
-        });
         const statuses = yield* Effect.tryPromise({
           try: () => context.query.mcpServerStatus(),
           catch: (cause) => toRequestError(input.threadId, "mcpServerStatus", cause),
         });
-        const origins = yield* provideIo(
-          readClaudeMcpOrigins({
-            config: claudeSettings,
-            cwd: context.cwd,
-            environment: claudeEnvironment,
-            plugins: plugins.plugins,
-          }),
-        );
         const items = mapClaudeMcpInventory({
           statuses,
-          origins,
           dynamicNames: new Set(context.baseDynamicMcpServers.keys()),
         });
         for (const item of items) {

@@ -234,6 +234,13 @@ describe("ExtensionsPanel", () => {
     expect(markup).not.toContain("Effective ·");
   });
 
+  it("shows only the active scope for a single provider-declared origin", () => {
+    const markup = render(snapshot());
+
+    expect(markup).toContain("Active: T3 runtime");
+    expect(markup).not.toContain("Defined in: T3 runtime");
+  });
+
   it("explains unsupported inventory without hiding either section", () => {
     const value = snapshot();
     const markup = render(
