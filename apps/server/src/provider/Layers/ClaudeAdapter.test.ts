@@ -10,11 +10,16 @@ import type {
   PermissionResult,
   SDKMessage,
   SDKUserMessage,
+  McpServerConfig,
+  McpServerStatus,
+  SlashCommand,
+  Settings,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
   ClaudeSettings,
   ProviderDriverKind,
+  ProviderExtensionItemId,
   ProviderItemId,
   ProviderRuntimeEvent,
   type RuntimeMode,
@@ -37,13 +42,21 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
-import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+import type { ProviderExtensionsShape } from "../Services/ThreadExtensions.ts";
+import {
+  CLAUDE_EXTENSION_CAPABILITIES,
+  joinClaudeSkillCatalog,
+  makeClaudeAdapter,
+  mapClaudeMcpInventory,
+  type ClaudeAdapterLiveOptions,
+} from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
-class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()(
-  "t3/provider/Layers/ClaudeAdapter.test/ClaudeAdapter",
-) {}
+class ClaudeAdapter extends Context.Service<
+  ClaudeAdapter,
+  ClaudeAdapterShape & { readonly extensions: ProviderExtensionsShape }
+>()("t3/provider/Layers/ClaudeAdapter.test/ClaudeAdapter") {}
 
 class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   private readonly queue: Array<SDKMessage> = [];
@@ -59,6 +72,18 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
+  public readonly applyFlagSettingsCalls: Array<Partial<Settings>> = [];
+  public readonly toggleMcpServerCalls: Array<readonly [string, boolean]> = [];
+  public readonly reconnectMcpServerCalls: Array<string> = [];
+  public readonly setMcpServersCalls: Array<Record<string, McpServerConfig>> = [];
+  public initializationResultCalls = 0;
+  public reloadSkillsCalls = 0;
+  public reloadPluginsCalls = 0;
+  public mcpServerStatusCalls = 0;
+  public skills: SlashCommand[] = [];
+  public plugins: Array<{ name: string; path: string; source?: string }> = [];
+  public mcpStatuses: McpServerStatus[] = [];
+  public toggleMcpServerFailure: unknown | undefined;
   public closeCalls = 0;
 
   emit(message: SDKMessage): void {
@@ -115,6 +140,44 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
     this.setMaxThinkingTokensCalls.push(maxThinkingTokens);
   };
 
+  readonly initializationResult = async (): Promise<Record<string, never>> => {
+    this.initializationResultCalls += 1;
+    return {};
+  };
+
+  readonly reloadSkills = async () => {
+    this.reloadSkillsCalls += 1;
+    return { skills: this.skills };
+  };
+
+  readonly reloadPlugins = async () => {
+    this.reloadPluginsCalls += 1;
+    return { plugins: this.plugins };
+  };
+
+  readonly applyFlagSettings = async (settings: Partial<Settings>): Promise<void> => {
+    this.applyFlagSettingsCalls.push(settings);
+  };
+
+  readonly mcpServerStatus = async (): Promise<McpServerStatus[]> => {
+    this.mcpServerStatusCalls += 1;
+    return this.mcpStatuses;
+  };
+
+  readonly toggleMcpServer = async (name: string, enabled: boolean): Promise<void> => {
+    this.toggleMcpServerCalls.push([name, enabled]);
+    if (this.toggleMcpServerFailure !== undefined) throw this.toggleMcpServerFailure;
+  };
+
+  readonly reconnectMcpServer = async (name: string): Promise<void> => {
+    this.reconnectMcpServerCalls.push(name);
+  };
+
+  readonly setMcpServers = async (servers: Record<string, McpServerConfig>) => {
+    this.setMcpServersCalls.push(servers);
+    return { added: [], removed: [], errors: {} };
+  };
+
   readonly close = (): void => {
     this.closeCalls += 1;
     this.finish();
@@ -161,8 +224,12 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  readonly managementIdleTimeoutMs?: number;
+  readonly dynamicMcpServers?: Readonly<Record<string, McpServerConfig>>;
+  readonly queryFactory?: () => FakeClaudeQuery;
 }) {
   const query = new FakeClaudeQuery();
+  const queries: FakeClaudeQuery[] = [];
   let createInput:
     | {
         readonly prompt: AsyncIterable<SDKUserMessage>;
@@ -172,9 +239,15 @@ function makeHarness(config?: {
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
+    ...(config?.managementIdleTimeoutMs
+      ? { managementIdleTimeoutMs: config.managementIdleTimeoutMs }
+      : {}),
+    ...(config?.dynamicMcpServers ? { dynamicMcpServers: config.dynamicMcpServers } : {}),
     createQuery: (input) => {
       createInput = input;
-      return query;
+      const nextQuery = config?.queryFactory?.() ?? query;
+      queries.push(nextQuery);
+      return nextQuery;
     },
     ...(config?.nativeEventLogger
       ? {
@@ -206,6 +279,8 @@ function makeHarness(config?: {
       Layer.provideMerge(NodeServices.layer),
     ),
     query,
+    queries,
+    getCreateQueryCallCount: () => queries.length,
     getLastCreateQueryInput: () => createInput,
   };
 }
@@ -273,6 +348,117 @@ const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
 
 describe("ClaudeAdapterLive", () => {
+  it("advertises the exact Claude extension capability matrix", () => {
+    assert.deepEqual(CLAUDE_EXTENSION_CAPABILITIES, {
+      skills: { inventory: true, refresh: true, threadOverride: true },
+      mcp: {
+        inventory: true,
+        liveStatus: true,
+        threadOverride: true,
+        reconnect: true,
+        authenticate: false,
+      },
+    });
+  });
+
+  it("keeps duplicate skill paths and marks only Claude's resolved winner selectable", () => {
+    const personalPath = "/config/skills/deploy/SKILL.md";
+    const projectPath = "/repo/.claude/skills/deploy/SKILL.md";
+    const items = joinClaudeSkillCatalog(
+      [{ name: "deploy", description: "Personal deploy", argumentHint: "" }],
+      [
+        {
+          name: "deploy",
+          providerName: "deploy",
+          description: "Personal deploy",
+          path: personalPath,
+          declaredPath: personalPath,
+          scope: "user",
+          label: "Personal",
+          precedence: 1,
+        },
+        {
+          name: "deploy",
+          providerName: "deploy",
+          description: "Project deploy",
+          path: projectPath,
+          declaredPath: projectPath,
+          scope: "project",
+          label: "Project",
+          precedence: 2,
+        },
+      ],
+    );
+
+    assert.equal(items.length, 2);
+    assert.deepEqual(
+      items.map((item) => item.id),
+      [personalPath, projectPath],
+    );
+    assert.equal(items[0]?.providerEnabled, true);
+    assert.equal(items[1]?.providerEnabled, false);
+    assert.equal(items[1]?.shadowedBy, personalPath);
+  });
+
+  it("maps measured MCP status, tool-only counts, auth, and locked T3 runtime rows", () => {
+    const items = mapClaudeMcpInventory({
+      statuses: [
+        {
+          name: "docs",
+          status: "failed",
+          scope: "project",
+          error: "token=secret connection refused",
+          tools: [{ name: "search" }],
+        },
+        { name: "account", status: "needs-auth", scope: "user" },
+      ],
+      origins: [],
+      dynamicNames: new Set(["t3-code"]),
+    });
+
+    assert.deepEqual(
+      items.map((item) => ({
+        name: item.name,
+        startupStatus: item.startupStatus,
+        authStatus: item.authStatus,
+        toolCount: item.toolCount,
+        resourceCount: item.resourceCount,
+      })),
+      [
+        {
+          name: "docs",
+          startupStatus: "failed",
+          authStatus: "unknown",
+          toolCount: 1,
+          resourceCount: undefined,
+        },
+        {
+          name: "account",
+          startupStatus: "unknown",
+          authStatus: "needs-auth",
+          toolCount: undefined,
+          resourceCount: undefined,
+        },
+        {
+          name: "t3-code",
+          startupStatus: "starting",
+          authStatus: "unknown",
+          toolCount: undefined,
+          resourceCount: undefined,
+        },
+      ],
+    );
+    assert.equal(items[0]?.error, "token=[redacted] connection refused");
+    assert.deepEqual(
+      {
+        managed: items[2]?.managed,
+        toggleable: items[2]?.toggleable,
+        enabled: items[2]?.providerEnabled,
+      },
+      { managed: true, toggleable: false, enabled: true },
+    );
+  });
+
   it.effect("returns validation error for non-claude provider on startSession", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -4291,6 +4477,374 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(
         nativeThreadIds.every((threadId) => threadId === String(THREAD_ID)),
         true,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("prepares one query for preview inventory and adopts it for the first turn", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-management-"));
+    const cwd = NodePath.join(baseDir, "repo");
+    const configDir = NodePath.join(baseDir, "config");
+    const skillPath = NodePath.join(cwd, ".claude", "skills", "deploy", "SKILL.md");
+    NodeFS.mkdirSync(NodePath.dirname(skillPath), { recursive: true });
+    NodeFS.mkdirSync(NodePath.join(cwd, ".git"));
+    NodeFS.writeFileSync(skillPath, "---\nname: deploy\ndescription: Deploy.\n---\n");
+    const harness = makeHarness({ cwd, baseDir, claudeConfig: { homePath: configDir } });
+    harness.query.skills = [{ name: "deploy", description: "Deploy.", argumentHint: "" }];
+
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const adapter = yield* ClaudeAdapter;
+      const inventory = yield* adapter.extensions.skills!.inventory({ threadId: THREAD_ID, cwd });
+      assert.deepEqual(
+        inventory.items.map((skill) => skill.id),
+        [NodeFS.realpathSync(skillPath)],
+      );
+      assert.equal(harness.query.initializationResultCalls, 1);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+      yield* adapter.extensions.mcp!.reconnect!({
+        threadId: THREAD_ID,
+        cwd,
+        mcpServerId: ProviderExtensionItemId.make("docs"),
+      });
+      assert.deepEqual(harness.query.reconnectMcpServerCalls, ["docs"]);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd,
+      });
+      assert.equal(harness.getCreateQueryCallCount(), 1);
+      assert.equal(harness.query.closeCalls, 0);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("compiles initial skills and reconciles file-backed and dynamic MCP state", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-reconcile-"));
+    const cwd = NodePath.join(baseDir, "repo");
+    const configDir = NodePath.join(baseDir, "config");
+    const skillPath = NodePath.join(cwd, ".claude", "skills", "deploy", "SKILL.md");
+    const mcpPath = NodePath.join(cwd, ".mcp.json");
+    NodeFS.mkdirSync(NodePath.dirname(skillPath), { recursive: true });
+    NodeFS.mkdirSync(NodePath.join(cwd, ".git"));
+    NodeFS.writeFileSync(skillPath, "---\nname: deploy\ndescription: Deploy.\n---\n");
+    NodeFS.writeFileSync(
+      mcpPath,
+      '{"mcpServers":{"docs":{"type":"http","url":"https://example.test"}}}',
+    );
+    const canonicalSkillPath = NodeFS.realpathSync(skillPath);
+    const harness = makeHarness({
+      cwd,
+      baseDir,
+      claudeConfig: { homePath: configDir },
+      dynamicMcpServers: { runtime: { type: "http", url: "https://runtime.example.test" } },
+    });
+    harness.query.skills = [{ name: "deploy", description: "Deploy.", argumentHint: "" }];
+    harness.query.mcpStatuses = [
+      { name: "docs", status: "connected", scope: "project", tools: [] },
+      { name: "runtime", status: "connected", scope: "dynamic", tools: [] },
+    ];
+
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const adapter = yield* ClaudeAdapter;
+      const skillOverrides = {
+        [ProviderExtensionItemId.make(canonicalSkillPath)]: "disabled" as const,
+      };
+      yield* adapter.extensions.reconcileOverrides!({
+        threadId: THREAD_ID,
+        cwd,
+        skillOverrides,
+        mcpOverrides: {},
+        extensionOverridesRevision: 1,
+      });
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd,
+      });
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.skills, []);
+      assert.deepEqual(harness.query.applyFlagSettingsCalls, [
+        { skillOverrides: { deploy: "off" } },
+      ]);
+
+      const applied = yield* adapter.extensions.reconcileOverrides!({
+        threadId: THREAD_ID,
+        cwd,
+        skillOverrides,
+        mcpOverrides: { [ProviderExtensionItemId.make("docs")]: "disabled" },
+        extensionOverridesRevision: 2,
+      });
+      assert.equal(applied.state.appliedOverrideRevision, 2);
+      assert.deepEqual(harness.query.toggleMcpServerCalls, [["docs", false]]);
+
+      const dynamicApplied = yield* adapter.extensions.reconcileOverrides!({
+        threadId: THREAD_ID,
+        cwd,
+        skillOverrides,
+        mcpOverrides: {
+          [ProviderExtensionItemId.make("docs")]: "disabled",
+          [ProviderExtensionItemId.make("runtime")]: "disabled",
+        },
+        extensionOverridesRevision: 3,
+      });
+      assert.equal(dynamicApplied.state.appliedOverrideRevision, 3);
+      assert.equal(harness.query.applyFlagSettingsCalls.length, 1);
+      assert.deepEqual(harness.query.toggleMcpServerCalls, [["docs", false]]);
+      assert.deepEqual(harness.query.setMcpServersCalls, [{}]);
+
+      harness.query.toggleMcpServerFailure = new Error("temporary toggle failure");
+      const failed = yield* adapter.extensions.reconcileOverrides!({
+        threadId: THREAD_ID,
+        cwd,
+        skillOverrides,
+        mcpOverrides: {
+          [ProviderExtensionItemId.make("docs")]: "enabled",
+          [ProviderExtensionItemId.make("runtime")]: "disabled",
+        },
+        extensionOverridesRevision: 4,
+      }).pipe(Effect.result);
+      assert.equal(failed._tag, "Failure");
+      assert.deepEqual(yield* adapter.extensions.reconciliationState!(THREAD_ID), {
+        appliedOverrideRevision: 3,
+        pendingOverrideRevision: 4,
+        error: {
+          domain: "all",
+          message:
+            "Provider adapter request failed (claudeAgent) for toggleMcpServer: toggleMcpServer failed",
+          retryable: true,
+        },
+      });
+      harness.query.toggleMcpServerFailure = undefined;
+      const retried = yield* adapter.extensions.reconcileOverrides!({
+        threadId: THREAD_ID,
+        cwd,
+        skillOverrides,
+        mcpOverrides: {
+          [ProviderExtensionItemId.make("docs")]: "enabled",
+          [ProviderExtensionItemId.make("runtime")]: "disabled",
+        },
+        extensionOverridesRevision: 4,
+      });
+      assert.equal(retried.state.appliedOverrideRevision, 4);
+      assert.equal(NodeFS.readFileSync(skillPath, "utf8").includes("name: deploy"), true);
+      assert.equal(NodeFS.readFileSync(mcpPath, "utf8").includes("https://example.test"), true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("dispatches selected winners by slash name and rejects a shadowed path", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-selected-"));
+    const cwd = NodePath.join(baseDir, "repo");
+    const configDir = NodePath.join(baseDir, "config");
+    const personalPath = NodePath.join(configDir, "skills", "deploy", "SKILL.md");
+    const projectPath = NodePath.join(cwd, ".claude", "skills", "deploy", "SKILL.md");
+    const reviewPath = NodePath.join(cwd, ".claude", "skills", "review", "SKILL.md");
+    for (const [filePath, name, description] of [
+      [personalPath, "deploy", "Personal deploy."],
+      [projectPath, "deploy", "Project deploy."],
+      [reviewPath, "review", "Review."],
+    ] as const) {
+      NodeFS.mkdirSync(NodePath.dirname(filePath), { recursive: true });
+      NodeFS.writeFileSync(filePath, `---\nname: ${name}\ndescription: ${description}\n---\n`);
+    }
+    NodeFS.mkdirSync(NodePath.join(cwd, ".git"));
+    const harness = makeHarness({ cwd, baseDir, claudeConfig: { homePath: configDir } });
+    harness.query.skills = [
+      { name: "deploy", description: "Personal deploy.", argumentHint: "" },
+      { name: "review", description: "Review.", argumentHint: "" },
+    ];
+
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd,
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "Ship it",
+        attachments: [],
+        selectedSkills: [
+          {
+            id: ProviderExtensionItemId.make(NodeFS.realpathSync(personalPath)),
+            name: "deploy",
+            path: NodeFS.realpathSync(personalPath),
+          },
+          {
+            id: ProviderExtensionItemId.make(NodeFS.realpathSync(reviewPath)),
+            name: "review",
+            path: NodeFS.realpathSync(reviewPath),
+          },
+        ],
+      });
+      assert.equal(
+        yield* Effect.promise(() => readFirstPromptText(harness.getLastCreateQueryInput())),
+        "/deploy\n/review\n\nShip it",
+      );
+
+      const stale = yield* adapter
+        .sendTurn({
+          threadId: THREAD_ID,
+          input: "Wrong deploy",
+          attachments: [],
+          selectedSkills: [
+            {
+              id: ProviderExtensionItemId.make(NodeFS.realpathSync(projectPath)),
+              name: "deploy",
+              path: NodeFS.realpathSync(projectPath),
+            },
+          ],
+        })
+        .pipe(Effect.result);
+      assert.equal(stale._tag, "Failure");
+      if (stale._tag === "Failure") {
+        assert.equal(stale.failure._tag, "ProviderAdapterStaleSkillSelectionError");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("coalesces commands_changed and publishes invalidation before the update", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-invalidation-"));
+    const cwd = NodePath.join(baseDir, "repo");
+    NodeFS.mkdirSync(NodePath.join(cwd, ".git"), { recursive: true });
+    const harness = makeHarness({
+      cwd,
+      baseDir,
+      claudeConfig: { homePath: NodePath.join(baseDir, "config") },
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd,
+      });
+      const eventsFiber = yield* Stream.take(adapter.extensions.events, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      harness.query.emit({
+        type: "system",
+        subtype: "commands_changed",
+        commands: [],
+        session_id: "session",
+        uuid: "11111111-1111-4111-8111-111111111111",
+      } as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "commands_changed",
+        commands: [],
+        session_id: "session",
+        uuid: "22222222-2222-4222-8222-222222222222",
+      } as SDKMessage);
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepEqual(
+        events.map((event) => event.type),
+        ["inventory.invalidated", "inventory.updated"],
+      );
+      assert.equal(harness.query.reloadSkillsCalls, 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("closes an unprompted management query after the idle lease timeout", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-idle-"));
+    const cwd = NodePath.join(baseDir, "repo");
+    NodeFS.mkdirSync(NodePath.join(cwd, ".git"), { recursive: true });
+    const harness = makeHarness({
+      cwd,
+      baseDir,
+      claudeConfig: { homePath: NodePath.join(baseDir, "config") },
+      managementIdleTimeoutMs: 1_000,
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.extensions.skills!.inventory({ threadId: THREAD_ID, cwd });
+      assert.equal(harness.query.closeCalls, 0);
+      yield* TestClock.adjust("1 second");
+      yield* Effect.yieldNow;
+      assert.equal(harness.query.closeCalls, 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps two prepared Query catalogs isolated by thread", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-isolation-"));
+    const cwd = NodePath.join(baseDir, "repo");
+    NodeFS.mkdirSync(NodePath.join(cwd, ".git"), { recursive: true });
+    let queryIndex = 0;
+    const harness = makeHarness({
+      cwd,
+      baseDir,
+      claudeConfig: { homePath: NodePath.join(baseDir, "config") },
+      queryFactory: () => {
+        const query = new FakeClaudeQuery();
+        const name = queryIndex++ === 0 ? "alpha" : "beta";
+        query.skills = [{ name, description: `${name} skill`, argumentHint: "" }];
+        return query;
+      },
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const adapter = yield* ClaudeAdapter;
+      const alpha = yield* adapter.extensions.skills!.inventory({
+        threadId: ThreadId.make("claude-alpha"),
+        cwd,
+      });
+      const beta = yield* adapter.extensions.skills!.inventory({
+        threadId: ThreadId.make("claude-beta"),
+        cwd,
+      });
+      assert.deepEqual(
+        alpha.items.map((skill) => skill.name),
+        ["alpha"],
+      );
+      assert.deepEqual(
+        beta.items.map((skill) => skill.name),
+        ["beta"],
+      );
+      assert.equal(harness.queries.length, 2);
+      assert.deepEqual(
+        harness.queries.map((query) => query.reloadSkillsCalls),
+        [1, 1],
       );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
