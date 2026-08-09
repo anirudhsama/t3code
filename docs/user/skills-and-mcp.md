@@ -11,35 +11,55 @@ worktree attached to the thread. User and system skills remain available alongsi
 
 The panel groups skills by their source and shows where each skill came from. MCP servers include
 their configuration provenance, startup and authentication status, and reported tool and resource
-counts when the provider supplies them. Use **Refresh** after adding or removing a skill or changing
-provider-owned MCP configuration.
+counts after discovery has run. Opening the panel before the first message runs discovery once and
+caches the result; use **Refresh** after changing provider-owned MCP configuration.
 
-## Thread-scoped controls
+## Skills
 
-Skill and MCP switches apply only to the current thread. They do not edit skill files or the
-provider's configuration, and changing one thread does not change another thread.
+Skills are inventory-only in this panel. Expand the collapsed **Skills** section to inspect each
+skill's description, source, and any shadowing or name collision. T3 Code does not change skill
+enablement from this panel; the provider's effective inventory determines what appears in the
+composer picker.
 
-A disabled skill remains visible in the panel but is removed from the composer's skill picker. A
-disabled MCP server is excluded the next time the provider runtime is applied. The managed
-`t3-code` MCP connection cannot be disabled from the panel because it carries T3 Code's own runtime
-integration.
+## MCP controls
+
+MCP switches apply only to the current thread. They do not edit the provider's configuration, and
+changing one thread does not change another thread. A disabled MCP server is excluded the next time
+the provider runtime is applied. The managed `t3-code` MCP connection cannot be disabled because it
+carries T3 Code's own runtime integration.
+
+You can set MCP switches before sending the first message. Draft changes are marked **Will apply
+when this thread is created** and are saved with thread creation before the first provider session
+starts. This makes the selected MCP set effective for the first turn.
 
 Changes made during an active turn are saved immediately and applied at the next safe provider
 boundary. The panel distinguishes the saved setting from the setting currently applied by the
 runtime and reports retryable failures instead of pretending a change succeeded.
 
-These controls affect future availability. Disabling a skill or MCP server does not erase messages,
-tool calls, or other history already recorded in the thread.
+These controls affect future availability. Disabling an MCP server does not erase messages, tool
+calls, or other history already recorded in the thread.
+
+## MCP authentication
+
+When discovery reports **Login required**, select **Authenticate**. T3 Code starts the provider's
+login flow, opens it in a browser when the client is running locally with the server, and shows
+**Waiting for login** until the provider reports completion. A failed or timed-out login remains
+retryable from the same row.
+
+The login callback is bound to the server machine's loopback interface. Remote, relay, and tunnel
+clients therefore do not open the authorization URL automatically. Complete login from the machine
+running the T3 Code server; after the URL is created, the panel makes it available to copy for
+someone on that machine.
 
 ## Selecting skills in the composer
 
-Type `$` in the composer to select an enabled skill for the next message. Selected skills appear as
+Type `$` in the composer to select an available skill for the next message. Selected skills appear as
 chips and are sent as structured provider input. Skills with the same name are disambiguated by
 their source and path.
 
-The composer revalidates selections before sending. If a selected skill was disabled, removed, or
-replaced after selection, update the selection before sending rather than silently invoking a
-different skill.
+The composer revalidates selections before sending. If a selected skill was removed or replaced
+after selection, update the selection before sending rather than silently invoking a different
+skill.
 
 ## Provider availability
 
