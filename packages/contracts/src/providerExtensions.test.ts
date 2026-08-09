@@ -187,6 +187,28 @@ const authRoundTrip = roundTrip(
 
 it.effect("round-trips a thread extensions snapshot", () => snapshotRoundTrip);
 
+it.effect("decodes MCP inventories whose provider does not report resource counts", () => {
+  const withoutCounts = {
+    ...snapshot,
+    mcpServers: snapshot.mcpServers.map(
+      ({
+        toolCount: _toolCount,
+        resourceCount: _resourceCount,
+        resourceTemplateCount: _templates,
+        ...server
+      }) => ({
+        ...server,
+        toolCount: 12,
+      }),
+    ),
+  };
+  return roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsSnapshot),
+    Schema.encodeEffect(ThreadExtensionsSnapshot),
+    withoutCounts,
+  );
+});
+
 it.effect("round-trips extension RPC payloads and results", () =>
   Effect.gen(function* () {
     for (const effect of rpcRoundTrips) {

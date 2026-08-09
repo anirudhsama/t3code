@@ -114,9 +114,9 @@ export const ProviderMcpServer = Schema.Struct({
   statusObserved: Schema.Boolean,
   error: Schema.optional(TrimmedNonEmptyString),
   serverInfo: Schema.optional(Schema.Unknown),
-  toolCount: NonNegativeInt,
-  resourceCount: NonNegativeInt,
-  resourceTemplateCount: NonNegativeInt,
+  toolCount: Schema.optional(NonNegativeInt),
+  resourceCount: Schema.optional(NonNegativeInt),
+  resourceTemplateCount: Schema.optional(NonNegativeInt),
 });
 export type ProviderMcpServer = typeof ProviderMcpServer.Type;
 
