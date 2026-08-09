@@ -509,18 +509,11 @@ export const requestAllCodexMcpServerStatus = Effect.fn("requestAllCodexMcpServe
     readonly client: CodexMcpStatusClient;
     readonly providerThreadId: string | undefined;
   }) {
-    if (!input.providerThreadId) {
-      return {
-        data: [],
-        nextCursor: null,
-      } satisfies EffectCodexSchema.V2ListMcpServerStatusResponse;
-    }
-
     const data: Array<EffectCodexSchema.V2ListMcpServerStatusResponse__McpServerStatus> = [];
     let cursor: string | null | undefined;
     do {
       const response = yield* input.client.request("mcpServerStatus/list", {
-        threadId: input.providerThreadId,
+        ...(input.providerThreadId ? { threadId: input.providerThreadId } : {}),
         detail: "toolsAndAuthOnly",
         ...(cursor ? { cursor } : {}),
       });
@@ -1869,6 +1862,7 @@ export const makeCodexSessionRuntime = (
           const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
           return yield* client.request("mcpServer/oauth/login", {
             name,
+            timeoutSecs: 120,
             ...(providerThreadId ? { threadId: providerThreadId } : {}),
           });
         }),

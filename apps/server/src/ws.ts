@@ -32,6 +32,7 @@ import {
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
   type ProjectId,
+  ProviderExtensionItemId,
   type ProjectEntriesFailure,
   type ProjectFileFailure,
   type ProjectFileOperation,
@@ -910,6 +911,22 @@ const makeWsRpcLayer = (
                 createdAt: bootstrap.createThread.createdAt,
               });
               createdThread = true;
+
+              let expectedRevision = 0;
+              for (const [mcpServerId, state] of Object.entries(
+                bootstrap.createThread.initialMcpOverrides ?? {},
+              )) {
+                yield* orchestrationEngine.dispatch({
+                  type: "thread.mcp-override.set",
+                  commandId: yield* serverCommandId("bootstrap-thread-mcp-override"),
+                  threadId: command.threadId,
+                  mcpServerId: ProviderExtensionItemId.make(mcpServerId),
+                  state,
+                  expectedRevision,
+                  createdAt: yield* nowIso,
+                });
+                expectedRevision += 1;
+              }
             }
 
             if (bootstrap?.prepareWorktree) {
@@ -1425,10 +1442,37 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "extensions" },
           ),
+        [EXTENSIONS_WS_METHODS.refreshPreview]: (input) =>
+          observeRpcEffect(
+            EXTENSIONS_WS_METHODS.refreshPreview,
+            threadExtensions.refreshPreview({
+              threadId: input.threadId,
+              projectId: input.projectId,
+              providerInstanceId: input.providerInstanceId,
+              ...(input.domain === undefined ? {} : { domain: input.domain }),
+            }),
+            { "rpc.aggregate": "extensions" },
+          ),
         [EXTENSIONS_WS_METHODS.subscribeThread]: (input) =>
           observeRpcStream(
             EXTENSIONS_WS_METHODS.subscribeThread,
             threadExtensions.events(input).pipe(
+              Stream.mapAccum(
+                () => true,
+                (first, snapshot) => [
+                  false,
+                  first
+                    ? [{ kind: "snapshot" as const, snapshot }, { kind: "synchronized" as const }]
+                    : [{ kind: "snapshot" as const, snapshot }],
+                ],
+              ),
+            ),
+            { "rpc.aggregate": "extensions" },
+          ),
+        [EXTENSIONS_WS_METHODS.subscribePreview]: (input) =>
+          observeRpcStream(
+            EXTENSIONS_WS_METHODS.subscribePreview,
+            threadExtensions.previewEvents(input).pipe(
               Stream.mapAccum(
                 () => true,
                 (first, snapshot) => [

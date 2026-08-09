@@ -25,6 +25,7 @@ import {
   ThreadTurnStartRequestedPayload,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderExtensionItemId } from "./providerExtensions.ts";
 
 const decodeTurnDiffInput = Schema.decodeUnknownEffect(OrchestrationGetTurnDiffInput);
 const decodeFullThreadDiffInput = Schema.decodeUnknownEffect(OrchestrationGetFullThreadDiffInput);
@@ -278,6 +279,10 @@ it.effect("accepts bootstrap metadata in thread.turn.start", () =>
           branch: null,
           worktreePath: null,
           createdAt: "2026-01-01T00:00:00.000Z",
+          initialMcpOverrides: {
+            [ProviderExtensionItemId.make("github")]: "disabled",
+            [ProviderExtensionItemId.make("docs")]: "enabled",
+          },
         },
         prepareWorktree: {
           projectCwd: "/tmp/workspace",
@@ -290,6 +295,10 @@ it.effect("accepts bootstrap metadata in thread.turn.start", () =>
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.bootstrap?.createThread?.projectId, "project-1");
+    assert.deepStrictEqual(parsed.bootstrap?.createThread?.initialMcpOverrides, {
+      [ProviderExtensionItemId.make("github")]: "disabled",
+      [ProviderExtensionItemId.make("docs")]: "enabled",
+    });
     assert.strictEqual(parsed.bootstrap?.prepareWorktree?.baseBranch, "main");
     assert.strictEqual(parsed.bootstrap?.prepareWorktree?.startFromOrigin, true);
     assert.strictEqual(parsed.bootstrap?.runSetupScript, true);

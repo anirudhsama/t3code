@@ -10,7 +10,6 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import {
   createAtomCommandScheduler,
   createEnvironmentRpcCommand,
-  createEnvironmentRpcQueryAtomFamily,
   createEnvironmentRpcSubscriptionAtomFamily,
 } from "./runtime.ts";
 
@@ -81,15 +80,27 @@ export function createExtensionsEnvironmentAtoms<R, E>(
           ),
         ),
     }),
-    previewSnapshot: createEnvironmentRpcQueryAtomFamily(runtime, {
+    previewSnapshot: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:extensions:preview-snapshot",
-      tag: EXTENSIONS_WS_METHODS.getPreviewSnapshot,
-      staleTimeMs: 5_000,
+      tag: EXTENSIONS_WS_METHODS.subscribePreview,
       idleTtlMs: 0,
+      transform: (stream) =>
+        stream.pipe(
+          Stream.mapAccum(
+            () => null as ThreadExtensionsSnapshot | null,
+            projectThreadExtensionsSnapshot,
+          ),
+        ),
     }),
     refresh: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:extensions:refresh",
       tag: EXTENSIONS_WS_METHODS.refreshThread,
+      scheduler: actionScheduler,
+      concurrency: actionConcurrency,
+    }),
+    refreshPreview: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:extensions:refresh-preview",
+      tag: EXTENSIONS_WS_METHODS.refreshPreview,
       scheduler: actionScheduler,
       concurrency: actionConcurrency,
     }),

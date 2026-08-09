@@ -494,6 +494,16 @@ export const makeThreadExtensions = Effect.fn("makeThreadExtensions")(
         ),
       );
 
+    const refreshPreview: ThreadExtensionsShape["refreshPreview"] = (input) =>
+      protectSnapshot(
+        `preview:${input.threadId}`,
+        resolvePreviewContext(input).pipe(
+          Effect.flatMap((context) =>
+            buildSnapshot(context, { refreshDomain: input.domain ?? "all" }),
+          ),
+        ),
+      );
+
     const events: ThreadExtensionsShape["events"] = (input) => {
       return Stream.unwrap(
         resolveThreadContext(input.threadId).pipe(
@@ -531,6 +541,23 @@ export const makeThreadExtensions = Effect.fn("makeThreadExtensions")(
       );
     };
 
+    const previewEvents: ThreadExtensionsShape["previewEvents"] = (input) =>
+      Stream.unwrap(
+        resolvePreviewContext(input).pipe(
+          Effect.map((context) =>
+            Stream.merge(
+              Stream.make(undefined),
+              context.instance.extensions
+                ? context.instance.extensions.events.pipe(
+                    Stream.filter((event) => event.threadId === input.threadId),
+                    Stream.map(() => undefined),
+                  )
+                : Stream.empty,
+            ).pipe(Stream.mapEffect(() => previewSnapshot(input))),
+          ),
+        ),
+      );
+
     const reconnectMcp: NonNullable<ThreadExtensionsShape["reconnectMcp"]> = Effect.fn(
       "ThreadExtensions.reconnectMcp",
     )(function* (input) {
@@ -553,7 +580,14 @@ export const makeThreadExtensions = Effect.fn("makeThreadExtensions")(
     const beginMcpAuth: NonNullable<ThreadExtensionsShape["beginMcpAuth"]> = Effect.fn(
       "ThreadExtensions.beginMcpAuth",
     )(function* (input) {
-      const context = yield* resolveThreadContext(input.threadId);
+      const context =
+        input.projectId === undefined || input.providerInstanceId === undefined
+          ? yield* resolveThreadContext(input.threadId)
+          : yield* resolvePreviewContext({
+              threadId: input.threadId,
+              projectId: input.projectId,
+              providerInstanceId: input.providerInstanceId,
+            });
       const authenticate = context.instance.extensions?.mcp?.authenticate;
       if (!authenticate) {
         return yield* rpcError("unsupported", "This provider does not support MCP authentication.");
@@ -571,7 +605,14 @@ export const makeThreadExtensions = Effect.fn("makeThreadExtensions")(
         ),
       );
       return {
-        snapshot: yield* snapshot({ threadId: input.threadId }),
+        snapshot:
+          input.projectId === undefined || input.providerInstanceId === undefined
+            ? yield* snapshot({ threadId: input.threadId })
+            : yield* previewSnapshot({
+                threadId: input.threadId,
+                projectId: input.projectId,
+                providerInstanceId: input.providerInstanceId,
+              }),
         authorizationUrl: result.authorizationUrl,
       };
     });
@@ -580,7 +621,9 @@ export const makeThreadExtensions = Effect.fn("makeThreadExtensions")(
       snapshot,
       previewSnapshot,
       refresh,
+      refreshPreview,
       events,
+      previewEvents,
       reconnectMcp,
       beginMcpAuth,
     });

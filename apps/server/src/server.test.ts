@@ -28,6 +28,7 @@ import {
   type PreviewEvent,
   ProjectId,
   ProviderDriverKind,
+  ProviderExtensionItemId,
   ProviderInstanceId,
   ResolvedKeybindingRule,
   ThreadId,
@@ -654,6 +655,10 @@ const buildAppUnderTest = (options?: {
             previewSnapshot: () =>
               Effect.die("ThreadExtensions.previewSnapshot not stubbed in this test"),
             refresh: () => Effect.die("ThreadExtensions.refresh not stubbed in this test"),
+            refreshPreview: () =>
+              Effect.die("ThreadExtensions.refreshPreview not stubbed in this test"),
+            previewEvents: () =>
+              Stream.die("ThreadExtensions.previewEvents not stubbed in this test"),
             events: () => Stream.empty,
             reconnectMcp: () =>
               Effect.die("ThreadExtensions.reconnectMcp not stubbed in this test"),
@@ -7383,6 +7388,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   branch: "main",
                   worktreePath: null,
                   createdAt,
+                  initialMcpOverrides: {
+                    [ProviderExtensionItemId.make("github")]: "disabled",
+                    [ProviderExtensionItemId.make("docs")]: "enabled",
+                  },
                 },
                 prepareWorktree: {
                   projectCwd: "/tmp/project",
@@ -7397,11 +7406,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ),
         );
 
-        assert.equal(response.sequence, 5);
+        assert.equal(response.sequence, 7);
         assert.deepEqual(
           dispatchedCommands.map((command) => command.type),
           [
             "thread.create",
+            "thread.mcp-override.set",
+            "thread.mcp-override.set",
             "thread.meta.update",
             "thread.activity.append",
             "thread.activity.append",
@@ -7446,7 +7457,24 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           setupActivities.map((command) => command.activity.kind),
           ["setup-script.requested", "setup-script.started"],
         );
-        const finalCommand = dispatchedCommands[4];
+        const overrideCommands = dispatchedCommands.filter(
+          (
+            command,
+          ): command is Extract<OrchestrationCommand, { type: "thread.mcp-override.set" }> =>
+            command.type === "thread.mcp-override.set",
+        );
+        assert.deepEqual(
+          overrideCommands.map((command) => ({
+            mcpServerId: command.mcpServerId,
+            state: command.state,
+            expectedRevision: command.expectedRevision,
+          })),
+          [
+            { mcpServerId: "github", state: "disabled", expectedRevision: 0 },
+            { mcpServerId: "docs", state: "enabled", expectedRevision: 1 },
+          ],
+        );
+        const finalCommand = dispatchedCommands[6];
         assertTrue(finalCommand?.type === "thread.turn.start");
         if (finalCommand?.type === "thread.turn.start") {
           assert.equal(finalCommand.bootstrap, undefined);

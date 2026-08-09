@@ -807,6 +807,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
+  initialMcpOverrides: Schema.optional(ProviderMcpOverrides),
 });
 
 const ThreadTurnStartBootstrapPrepareWorktree = Schema.Struct({

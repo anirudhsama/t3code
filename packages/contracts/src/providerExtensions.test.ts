@@ -55,6 +55,7 @@ const snapshot = {
       toggleable: true,
       startupStatus: "ready",
       authStatus: "authenticated",
+      statusObserved: true,
       serverInfo: { name: "github", version: "1" },
       toolCount: 12,
       resourceCount: 0,
@@ -107,9 +108,28 @@ const rpcRoundTrips = [
     { threadId: "thread-1", domain: "skills" },
   ),
   roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.refreshPreview.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.refreshPreview.input),
+    {
+      threadId: "thread-pending",
+      projectId: "project-1",
+      providerInstanceId: "codex",
+      domain: "mcp",
+    },
+  ),
+  roundTrip(
     Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.subscribeThread.input),
     Schema.encodeEffect(ThreadExtensionsRpcSchemas.subscribeThread.input),
     { threadId: "thread-1" },
+  ),
+  roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.subscribePreview.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.subscribePreview.input),
+    {
+      threadId: "thread-pending",
+      projectId: "project-1",
+      providerInstanceId: "codex",
+    },
   ),
   roundTrip(
     Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.reconnectMcp.input),
@@ -120,6 +140,16 @@ const rpcRoundTrips = [
     Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.beginMcpAuth.input),
     Schema.encodeEffect(ThreadExtensionsRpcSchemas.beginMcpAuth.input),
     { threadId: "thread-1", mcpServerId: "github" },
+  ),
+  roundTrip(
+    Schema.decodeUnknownEffect(ThreadExtensionsRpcSchemas.beginMcpAuth.input),
+    Schema.encodeEffect(ThreadExtensionsRpcSchemas.beginMcpAuth.input),
+    {
+      threadId: "thread-pending",
+      projectId: "project-1",
+      providerInstanceId: "codex",
+      mcpServerId: "github",
+    },
   ),
 ];
 

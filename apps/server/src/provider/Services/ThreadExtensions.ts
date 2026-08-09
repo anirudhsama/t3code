@@ -10,6 +10,7 @@ import type {
   RuntimeMode,
   ThreadExtensionsMcpAuthResult,
   ThreadExtensionsGetPreviewSnapshotInput,
+  ThreadExtensionsMcpAuthInput,
   ThreadExtensionsRefreshDomain,
   ThreadExtensionsRpcError,
   ThreadExtensionsSnapshot,
@@ -158,17 +159,24 @@ export interface ThreadExtensionsShape {
     readonly threadId: ThreadId;
     readonly domain?: ThreadExtensionsRefreshDomain;
   }) => Effect.Effect<ThreadExtensionsSnapshot, ThreadExtensionsRpcError>;
+  readonly refreshPreview: (
+    input: ThreadExtensionsGetPreviewSnapshotInput & {
+      readonly domain?: ThreadExtensionsRefreshDomain;
+    },
+  ) => Effect.Effect<ThreadExtensionsSnapshot, ThreadExtensionsRpcError>;
   readonly events: (input: {
     readonly threadId: ThreadId;
   }) => Stream.Stream<ThreadExtensionsSnapshot, ThreadExtensionsRpcError>;
+  readonly previewEvents: (
+    input: ThreadExtensionsGetPreviewSnapshotInput,
+  ) => Stream.Stream<ThreadExtensionsSnapshot, ThreadExtensionsRpcError>;
   readonly reconnectMcp?: (input: {
     readonly threadId: ThreadId;
     readonly mcpServerId: ProviderExtensionItemId;
   }) => Effect.Effect<ThreadExtensionsSnapshot, ThreadExtensionsRpcError>;
-  readonly beginMcpAuth?: (input: {
-    readonly threadId: ThreadId;
-    readonly mcpServerId: ProviderExtensionItemId;
-  }) => Effect.Effect<ThreadExtensionsMcpAuthResult, ThreadExtensionsRpcError>;
+  readonly beginMcpAuth?: (
+    input: ThreadExtensionsMcpAuthInput,
+  ) => Effect.Effect<ThreadExtensionsMcpAuthResult, ThreadExtensionsRpcError>;
 }
 
 export class ThreadExtensions extends Context.Service<ThreadExtensions, ThreadExtensionsShape>()(

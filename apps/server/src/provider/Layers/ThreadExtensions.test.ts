@@ -121,6 +121,7 @@ function makeInstance(reconciliation: "failed" | "idle" = "failed"): ProviderIns
                 toggleable: true,
                 startupStatus: "ready" as const,
                 authStatus: "authenticated" as const,
+                statusObserved: true,
                 toolCount: 20,
                 resourceCount: 2,
                 resourceTemplateCount: 1,
@@ -134,6 +135,7 @@ function makeInstance(reconciliation: "failed" | "idle" = "failed"): ProviderIns
                 toggleable: false,
                 startupStatus: "ready" as const,
                 authStatus: "authenticated" as const,
+                statusObserved: true,
                 toolCount: 3,
                 resourceCount: 0,
                 resourceTemplateCount: 0,
@@ -305,6 +307,38 @@ describe("ThreadExtensions", () => {
         })
         .pipe(Effect.flip);
       expect(error.reason).toBe("invalid-state");
+    }),
+  );
+
+  it.effect("begins MCP authentication through a prepared draft runtime", () =>
+    Effect.gen(function* () {
+      const pendingId = ThreadId.make("pending-auth-thread");
+      let authenticatedThreadId: ThreadId | null = null;
+      const base = makeInstance();
+      const instance = {
+        ...base,
+        extensions: {
+          ...base.extensions!,
+          mcp: {
+            ...base.extensions!.mcp!,
+            authenticate: (input) => {
+              authenticatedThreadId = input.threadId;
+              return Effect.succeed({ authorizationUrl: "https://example.test/authorize" });
+            },
+          },
+        },
+      } as ProviderInstance;
+      const service = yield* makeService({ threads: new Map(), active: false, instance });
+      const result = yield* service.beginMcpAuth!({
+        threadId: pendingId,
+        projectId: PROJECT_ID,
+        providerInstanceId: INSTANCE_ID,
+        mcpServerId: ProviderExtensionItemId.make("github"),
+      });
+
+      expect(authenticatedThreadId).toBe(pendingId);
+      expect(result.authorizationUrl).toBe("https://example.test/authorize");
+      expect(result.snapshot.threadId).toBe(pendingId);
     }),
   );
 

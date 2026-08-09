@@ -36,6 +36,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -155,6 +156,7 @@ type CodexMcpDefinition = {
 type CodexMcpLiveStatus = {
   readonly startupStatus: ProviderMcpInventoryItem["startupStatus"];
   readonly authStatus: ProviderMcpInventoryItem["authStatus"];
+  readonly statusObserved: boolean;
   readonly error?: string;
   readonly serverInfo?: unknown;
   readonly toolCount: number;
@@ -332,6 +334,7 @@ function parseCodexMcpLiveStatus(
   return {
     startupStatus: status.serverInfo ? "ready" : "unknown",
     authStatus: codexMcpAuthStatus(status.authStatus),
+    statusObserved: true,
     ...(status.serverInfo ? { serverInfo: status.serverInfo } : {}),
     toolCount: Object.keys(status.tools).length,
     resourceCount: status.resources.length,
@@ -343,6 +346,7 @@ function emptyCodexMcpLiveStatus(providerEnabled: boolean): CodexMcpLiveStatus {
   return {
     startupStatus: providerEnabled ? "unknown" : "disabled",
     authStatus: "unknown",
+    statusObserved: false,
     toolCount: 0,
     resourceCount: 0,
     resourceTemplateCount: 0,
@@ -401,6 +405,7 @@ export interface CodexAdapterLiveOptions {
   >;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  readonly managementIdleTimeoutMs?: number;
 }
 
 interface CodexAdapterSessionContext {
@@ -410,6 +415,9 @@ interface CodexAdapterSessionContext {
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
+  managementIdleFiber: Fiber.Fiber<void, never> | undefined;
+  managementLeaseCount: number;
+  starting: boolean;
   started: boolean;
   stopped: boolean;
 }
@@ -1976,6 +1984,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   options?: CodexAdapterLiveOptions,
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
+  const adapterScope = yield* Scope.Scope;
   const fileSystem = yield* FileSystem.FileSystem;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
@@ -2001,6 +2010,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const extensionReconciliationStates = new Map<ThreadId, ProviderExtensionReconciliationState>();
   let nextInventoryRequestId = 0;
   let inventoryRevision = 0;
+  const managementIdleTimeout = Duration.millis(
+    Math.max(1, options?.managementIdleTimeoutMs ?? 30 * 60 * 1000),
+  );
 
   const cacheKey = (cwd: string) => `${boundInstanceId}\u0000${cwd}`;
   const canonicalizeCwd = (cwd: string) =>
@@ -2193,12 +2205,82 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       scope: sessionScope,
       runtime,
       eventFiber,
+      managementIdleFiber: undefined,
+      managementLeaseCount: 0,
+      starting: false,
       started: false,
       stopped: false,
     };
     sessions.set(runtimeInput.threadId, context);
     return context;
   });
+
+  const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
+    session: CodexAdapterSessionContext,
+  ) {
+    if (session.stopped) {
+      return;
+    }
+    session.stopped = true;
+    if (session.managementIdleFiber) {
+      yield* Fiber.interrupt(session.managementIdleFiber).pipe(Effect.ignore);
+      session.managementIdleFiber = undefined;
+    }
+    sessions.delete(session.threadId);
+    mcpStatusCache.cache.delete(session.threadId);
+    mcpNotificationStatus.delete(session.threadId);
+    mcpNotificationRevision.delete(session.threadId);
+    yield* session.runtime.close.pipe(Effect.ignore);
+    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
+    yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
+  });
+
+  const releaseManagementContext = Effect.fn("CodexAdapter.releaseManagementContext")(function* (
+    context: CodexAdapterSessionContext,
+  ) {
+    context.managementLeaseCount = Math.max(0, context.managementLeaseCount - 1);
+    if (
+      context.managementLeaseCount > 0 ||
+      context.started ||
+      context.starting ||
+      context.stopped
+    ) {
+      return;
+    }
+    if (context.managementIdleFiber) {
+      yield* Fiber.interrupt(context.managementIdleFiber).pipe(Effect.ignore);
+    }
+    context.managementIdleFiber = yield* Effect.sleep(managementIdleTimeout).pipe(
+      Effect.andThen(
+        Effect.suspend(() => {
+          if (
+            context.managementLeaseCount > 0 ||
+            context.started ||
+            context.starting ||
+            context.stopped
+          ) {
+            return Effect.void;
+          }
+          context.managementIdleFiber = undefined;
+          return stopSessionInternal(context);
+        }),
+      ),
+      Effect.forkIn(adapterScope),
+    );
+  });
+
+  const withManagementContext = <A, E>(
+    context: CodexAdapterSessionContext,
+    effect: Effect.Effect<A, E>,
+  ): Effect.Effect<A, E> =>
+    Effect.gen(function* () {
+      context.managementLeaseCount += 1;
+      if (context.managementIdleFiber) {
+        yield* Fiber.interrupt(context.managementIdleFiber).pipe(Effect.ignore);
+        context.managementIdleFiber = undefined;
+      }
+      return yield* effect.pipe(Effect.ensuring(releaseManagementContext(context)));
+    });
 
   const ensureExtensionContext = Effect.fn("CodexAdapter.ensureExtensionContext")(function* (
     input: ProviderExtensionRuntimeContext,
@@ -2253,6 +2335,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       if (!context) {
         context = yield* createSessionContext(buildRuntimeOptions({ ...input, cwd }));
         reusePreparedRuntime = false;
+      }
+      context.starting = true;
+      if (context.managementIdleFiber) {
+        yield* Fiber.interrupt(context.managementIdleFiber).pipe(Effect.ignore);
+        context.managementIdleFiber = undefined;
       }
 
       const serviceTier =
@@ -2347,6 +2434,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         });
       }
       context.started = true;
+      context.starting = false;
       mcpStatusCache.cache.delete(input.threadId);
       return started;
     },
@@ -2357,51 +2445,56 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   ) {
     const context = yield* ensureExtensionContext(input);
     const key = cacheKey(context.cwd);
-    return yield* readCachedInventory({
-      state: skillInventoryCache,
-      key,
-      forceReload: input.forceReload,
-      load: () =>
-        context.runtime
-          .listSkills({
-            cwd: context.cwd,
-            ...(input.forceReload ? { forceReload: true } : {}),
-          })
-          .pipe(
-            Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "skills/list", cause)),
-            Effect.flatMap((response) => {
-              const parsed = parseCodexSkillsInventory(response, context.cwd);
-              return Effect.forEach(
-                parsed.items,
-                (skill) =>
-                  skill.path
-                    ? fileSystem.realPath(skill.path).pipe(
-                        Effect.orElseSucceed(() => skill.path!),
-                        Effect.map((canonicalPath) => ({
-                          ...skill,
-                          id: ProviderExtensionItemId.make(canonicalPath),
-                          path: canonicalPath,
-                          ...(skill.origin
-                            ? {
-                                origin: {
-                                  ...skill.origin,
-                                  path: canonicalPath,
-                                },
-                              }
-                            : {}),
-                        })),
-                      )
-                    : Effect.succeed(skill),
-                { concurrency: "unbounded" },
-              ).pipe(
-                Effect.map((items) => ({
-                  items,
-                  warnings: parsed.warnings,
-                })),
-              );
-            }),
-          ),
-    });
+    return yield* withManagementContext(
+      context,
+      readCachedInventory({
+        state: skillInventoryCache,
+        key,
+        forceReload: input.forceReload,
+        load: () =>
+          context.runtime
+            .listSkills({
+              cwd: context.cwd,
+              ...(input.forceReload ? { forceReload: true } : {}),
+            })
+            .pipe(
+              Effect.mapError((cause) =>
+                mapCodexRuntimeError(input.threadId, "skills/list", cause),
+              ),
+              Effect.flatMap((response) => {
+                const parsed = parseCodexSkillsInventory(response, context.cwd);
+                return Effect.forEach(
+                  parsed.items,
+                  (skill) =>
+                    skill.path
+                      ? fileSystem.realPath(skill.path).pipe(
+                          Effect.orElseSucceed(() => skill.path!),
+                          Effect.map((canonicalPath) => ({
+                            ...skill,
+                            id: ProviderExtensionItemId.make(canonicalPath),
+                            path: canonicalPath,
+                            ...(skill.origin
+                              ? {
+                                  origin: {
+                                    ...skill.origin,
+                                    path: canonicalPath,
+                                  },
+                                }
+                              : {}),
+                          })),
+                        )
+                      : Effect.succeed(skill),
+                  { concurrency: "unbounded" },
+                ).pipe(
+                  Effect.map((items) => ({
+                    items,
+                    warnings: parsed.warnings,
+                  })),
+                );
+              }),
+            ),
+      }),
+    );
   });
 
   const readMcpDefinitions = Effect.fn("CodexAdapter.readMcpDefinitions")(function* (
@@ -2409,45 +2502,51 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   ) {
     const context = yield* ensureExtensionContext(input);
     const key = cacheKey(context.cwd);
-    return yield* readCachedInventory({
-      state: mcpDefinitionCache,
-      key,
-      forceReload: input.forceReload,
-      load: () =>
-        context.runtime.readMcpConfig(context.cwd).pipe(
-          Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "config/read", cause)),
-          Effect.map((response) => ({
-            items: parseCodexMcpDefinitions(
-              response,
-              McpProviderSession.readMcpProviderSession(input.threadId)
-                ? new Set([MANAGED_T3_MCP_SERVER_ID])
-                : new Set(),
-            ),
-          })),
-        ),
-    });
+    return yield* withManagementContext(
+      context,
+      readCachedInventory({
+        state: mcpDefinitionCache,
+        key,
+        forceReload: input.forceReload,
+        load: () =>
+          context.runtime.readMcpConfig(context.cwd).pipe(
+            Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "config/read", cause)),
+            Effect.map((response) => ({
+              items: parseCodexMcpDefinitions(
+                response,
+                McpProviderSession.readMcpProviderSession(input.threadId)
+                  ? new Set([MANAGED_T3_MCP_SERVER_ID])
+                  : new Set(),
+              ),
+            })),
+          ),
+      }),
+    );
   });
 
   const readMcpStatus = Effect.fn("CodexAdapter.readMcpStatus")(function* (
     input: ProviderExtensionRuntimeContext & { readonly forceReload: boolean },
   ) {
     const context = yield* ensureExtensionContext(input);
-    return yield* readCachedInventory({
-      state: mcpStatusCache,
-      key: input.threadId,
-      forceReload: input.forceReload,
-      load: () =>
-        context.runtime.listMcpServerStatus.pipe(
-          Effect.mapError((cause) =>
-            mapCodexRuntimeError(input.threadId, "mcpServerStatus/list", cause),
-          ),
-          Effect.map((response) => ({
-            items: response.data.map(
-              (status) => [status.name, parseCodexMcpLiveStatus(status)] as const,
+    return yield* withManagementContext(
+      context,
+      readCachedInventory({
+        state: mcpStatusCache,
+        key: input.threadId,
+        forceReload: input.forceReload,
+        load: () =>
+          context.runtime.listMcpServerStatus.pipe(
+            Effect.mapError((cause) =>
+              mapCodexRuntimeError(input.threadId, "mcpServerStatus/list", cause),
             ),
-          })),
-        ),
-    });
+            Effect.map((response) => ({
+              items: response.data.map(
+                (status) => [status.name, parseCodexMcpLiveStatus(status)] as const,
+              ),
+            })),
+          ),
+      }),
+    );
   });
 
   const readMcpInventory: ProviderExtensionMcpFacet["inventory"] = Effect.fn(
@@ -2498,13 +2597,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     authenticate: (input) =>
       ensureExtensionContext(input).pipe(
         Effect.flatMap((context) =>
-          context.runtime
-            .beginMcpAuth(input.mcpServerId)
-            .pipe(
-              Effect.mapError((cause) =>
-                mapCodexRuntimeError(input.threadId, "mcpServer/oauth/login", cause),
+          withManagementContext(
+            context,
+            context.runtime
+              .beginMcpAuth(input.mcpServerId)
+              .pipe(
+                Effect.mapError((cause) =>
+                  mapCodexRuntimeError(input.threadId, "mcpServer/oauth/login", cause),
+                ),
               ),
-            ),
+          ),
         ),
       ),
   } satisfies ProviderExtensionMcpFacet;
@@ -2571,6 +2673,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         startup
           ? {
               ...previousWithoutError,
+              statusObserved: true,
               startupStatus: startup.status,
               ...(startup.error ? { error: startup.error } : {}),
               ...(startup.failureReason === "reauthenticationRequired"
@@ -2579,8 +2682,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             }
           : {
               ...previousWithoutError,
+              statusObserved: true,
               authStatus: oauth!.success ? "authenticated" : "needs-auth",
-              ...(oauth!.error ? { error: oauth!.error } : {}),
+              ...(!oauth!.success
+                ? { error: oauth!.error ?? "Authentication did not complete." }
+                : {}),
             },
       );
       mcpNotificationStatus.set(context.threadId, threadStatuses);
@@ -2812,22 +2918,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return;
     }
     yield* nativeEventLogger.write(event, event.threadId);
-  });
-
-  const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
-    session: CodexAdapterSessionContext,
-  ) {
-    if (session.stopped) {
-      return;
-    }
-    session.stopped = true;
-    sessions.delete(session.threadId);
-    mcpStatusCache.cache.delete(session.threadId);
-    mcpNotificationStatus.delete(session.threadId);
-    mcpNotificationRevision.delete(session.threadId);
-    yield* session.runtime.close.pipe(Effect.ignore);
-    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
-    yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
   });
 
   const reconcileOverrides: NonNullable<ProviderExtensionsShape["reconcileOverrides"]> = Effect.fn(

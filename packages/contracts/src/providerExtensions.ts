@@ -111,6 +111,7 @@ export const ProviderMcpServer = Schema.Struct({
   toggleable: Schema.Boolean,
   startupStatus: ProviderMcpStartupStatus,
   authStatus: ProviderMcpAuthStatus,
+  statusObserved: Schema.Boolean,
   error: Schema.optional(TrimmedNonEmptyString),
   serverInfo: Schema.optional(Schema.Unknown),
   toolCount: NonNegativeInt,
@@ -184,6 +185,12 @@ export const ThreadExtensionsRefreshInput = Schema.Struct({
 });
 export type ThreadExtensionsRefreshInput = typeof ThreadExtensionsRefreshInput.Type;
 
+export const ThreadExtensionsRefreshPreviewInput = Schema.Struct({
+  ...ThreadExtensionsGetPreviewSnapshotInput.fields,
+  domain: Schema.optional(ThreadExtensionsRefreshDomain),
+});
+export type ThreadExtensionsRefreshPreviewInput = typeof ThreadExtensionsRefreshPreviewInput.Type;
+
 export const ThreadExtensionsSubscribeInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -194,6 +201,19 @@ export const ThreadExtensionsMcpActionInput = Schema.Struct({
   mcpServerId: ProviderExtensionItemId,
 });
 export type ThreadExtensionsMcpActionInput = typeof ThreadExtensionsMcpActionInput.Type;
+
+export const ThreadExtensionsMcpAuthInput = Schema.Struct({
+  ...ThreadExtensionsMcpActionInput.fields,
+  projectId: Schema.optional(ProjectId),
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+}).check(
+  Schema.makeFilter(
+    (input) =>
+      (input.projectId === undefined) === (input.providerInstanceId === undefined) ||
+      "projectId and providerInstanceId must be provided together",
+  ),
+);
+export type ThreadExtensionsMcpAuthInput = typeof ThreadExtensionsMcpAuthInput.Type;
 
 export const ThreadExtensionsMcpAuthResult = Schema.Struct({
   snapshot: ThreadExtensionsSnapshot,
@@ -230,7 +250,9 @@ export const EXTENSIONS_WS_METHODS = {
   getThreadSnapshot: "extensions.getThreadSnapshot",
   getPreviewSnapshot: "extensions.getPreviewSnapshot",
   refreshThread: "extensions.refreshThread",
+  refreshPreview: "extensions.refreshPreview",
   subscribeThread: "extensions.subscribeThread",
+  subscribePreview: "extensions.subscribePreview",
   reconnectMcp: "extensions.reconnectMcp",
   beginMcpAuth: "extensions.beginMcpAuth",
 } as const;
@@ -248,8 +270,16 @@ export const ThreadExtensionsRpcSchemas = {
     input: ThreadExtensionsRefreshInput,
     output: ThreadExtensionsSnapshot,
   },
+  refreshPreview: {
+    input: ThreadExtensionsRefreshPreviewInput,
+    output: ThreadExtensionsSnapshot,
+  },
   subscribeThread: {
     input: ThreadExtensionsSubscribeInput,
+    output: ThreadExtensionsStreamItem,
+  },
+  subscribePreview: {
+    input: ThreadExtensionsGetPreviewSnapshotInput,
     output: ThreadExtensionsStreamItem,
   },
   reconnectMcp: {
@@ -257,7 +287,7 @@ export const ThreadExtensionsRpcSchemas = {
     output: ThreadExtensionsSnapshot,
   },
   beginMcpAuth: {
-    input: ThreadExtensionsMcpActionInput,
+    input: ThreadExtensionsMcpAuthInput,
     output: ThreadExtensionsMcpAuthResult,
   },
 } as const;

@@ -787,9 +787,22 @@ export const WsExtensionsRefreshThreadRpc = Rpc.make(EXTENSIONS_WS_METHODS.refre
   error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
 });
 
+export const WsExtensionsRefreshPreviewRpc = Rpc.make(EXTENSIONS_WS_METHODS.refreshPreview, {
+  payload: ThreadExtensionsRpcSchemas.refreshPreview.input,
+  success: ThreadExtensionsRpcSchemas.refreshPreview.output,
+  error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+});
+
 export const WsExtensionsSubscribeThreadRpc = Rpc.make(EXTENSIONS_WS_METHODS.subscribeThread, {
   payload: ThreadExtensionsRpcSchemas.subscribeThread.input,
   success: ThreadExtensionsRpcSchemas.subscribeThread.output,
+  error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+export const WsExtensionsSubscribePreviewRpc = Rpc.make(EXTENSIONS_WS_METHODS.subscribePreview, {
+  payload: ThreadExtensionsRpcSchemas.subscribePreview.input,
+  success: ThreadExtensionsRpcSchemas.subscribePreview.output,
   error: Schema.Union([ThreadExtensionsRpcError, EnvironmentAuthorizationError]),
   stream: true,
 });
@@ -941,7 +954,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsExtensionsGetThreadSnapshotRpc,
   WsExtensionsGetPreviewSnapshotRpc,
   WsExtensionsRefreshThreadRpc,
+  WsExtensionsRefreshPreviewRpc,
   WsExtensionsSubscribeThreadRpc,
+  WsExtensionsSubscribePreviewRpc,
   WsExtensionsReconnectMcpRpc,
   WsExtensionsBeginMcpAuthRpc,
 );

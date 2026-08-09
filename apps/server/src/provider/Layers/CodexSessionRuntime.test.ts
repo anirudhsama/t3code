@@ -584,7 +584,7 @@ describe("requestAllCodexMcpServerStatus", () => {
     }),
   );
 
-  it.effect("does not fall back to process-global status before a thread is open", () =>
+  it.effect("uses process-global status before a thread is open", () =>
     Effect.gen(function* () {
       let requested = false;
       const result = yield* requestAllCodexMcpServerStatus({
@@ -597,7 +597,7 @@ describe("requestAllCodexMcpServerStatus", () => {
         providerThreadId: undefined,
       });
 
-      NodeAssert.equal(requested, false);
+      NodeAssert.equal(requested, true);
       NodeAssert.deepStrictEqual(result, { data: [], nextCursor: null });
     }),
   );

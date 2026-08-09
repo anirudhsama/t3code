@@ -34,6 +34,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
@@ -1317,10 +1318,12 @@ function withExtensionsTestAdapter<A>(
   use: (
     adapter: CodexAdapterShape & { readonly extensions: ProviderExtensionsShape },
   ) => Effect.Effect<A, ProviderAdapterError, Scope.Scope>,
+  options?: { readonly managementIdleTimeoutMs?: number },
 ) {
   return Effect.gen(function* () {
     const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
       makeRuntime: runtimeFactory.factory,
+      ...options,
     });
     return yield* use(adapter);
   }).pipe(
@@ -1360,6 +1363,32 @@ it("compiles sparse Codex overrides and drops the managed t3-code MCP override",
         postgres: { enabled: true },
       },
     },
+  );
+});
+
+it.effect("reaps a management-only runtime after its idle window", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const threadId = asThreadId("thread-management-idle");
+
+  return withExtensionsTestAdapter(
+    runtimeFactory,
+    (adapter) =>
+      Effect.gen(function* () {
+        yield* adapter.extensions.skills!.inventory({
+          threadId,
+          cwd: "/workspace/management-idle",
+        });
+        const runtime = runtimeFactory.lastRuntime;
+        NodeAssert.ok(runtime);
+        NodeAssert.equal(runtime.closeImpl.mock.calls.length, 0);
+
+        yield* TestClock.adjust("11 millis");
+        yield* Effect.yieldNow;
+
+        NodeAssert.equal(runtime.closeImpl.mock.calls.length, 1);
+        NodeAssert.equal(yield* adapter.hasSession(threadId), false);
+      }),
+    { managementIdleTimeoutMs: 10 },
   );
 });
 
@@ -1977,6 +2006,7 @@ it.effect("overlays MCP live status notifications without polling", () => {
         toggleable: true,
         startupStatus: "unknown",
         authStatus: "needs-auth",
+        statusObserved: true,
         toolCount: 0,
         resourceCount: 0,
         resourceTemplateCount: 0,
@@ -2020,6 +2050,24 @@ it.effect("overlays MCP live status notifications without polling", () => {
       NodeAssert.equal(authenticated.items[0]?.authStatus, "authenticated");
       NodeAssert.ok(authenticated.revision > initial.revision);
       NodeAssert.equal(runtime.listMcpServerStatusImpl.mock.calls.length, 1);
+
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-auth-failed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "mcpServer/oauthLogin/completed",
+        payload: {
+          name: "docs",
+          success: false,
+          error: null,
+        },
+      });
+      yield* Effect.yieldNow;
+      const authFailed = yield* adapter.extensions.mcp!.inventory(input);
+      NodeAssert.equal(authFailed.items[0]?.authStatus, "needs-auth");
+      NodeAssert.equal(authFailed.items[0]?.error, "Authentication did not complete.");
       NodeAssert.deepStrictEqual(CODEX_EXTENSION_CAPABILITIES.mcp, {
         inventory: true,
         liveStatus: true,
