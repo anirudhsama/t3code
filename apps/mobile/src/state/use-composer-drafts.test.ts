@@ -66,6 +66,7 @@ import {
   composerDraftsAtom,
   copyComposerDraftContentIfEmpty,
   copyComposerDraftContentState,
+  decodePersistedComposerState,
   decodePersistedComposerDrafts,
   type ComposerDraft,
   flushComposerDrafts,
@@ -74,6 +75,7 @@ import {
   removeComposerDraftsForEnvironment,
   restoreComposerDraftSnapshotState,
   setComposerDraftText,
+  stickyComposerModelSelectionAtom,
 } from "./use-composer-drafts";
 
 const DRAFT: ComposerDraft = {
@@ -83,6 +85,7 @@ const DRAFT: ComposerDraft = {
 
 afterEach(() => {
   appAtomRegistry.set(composerDraftsAtom, {});
+  appAtomRegistry.set(stickyComposerModelSelectionAtom, null);
 });
 
 describe("mobile composer drafts", () => {
@@ -154,6 +157,22 @@ describe("mobile composer drafts", () => {
     ).toThrow();
   });
 
+  it("hydrates the global sticky model selection", () => {
+    expect(
+      decodePersistedComposerState({
+        schemaVersion: 1,
+        drafts: {},
+        stickyModelSelection: {
+          instanceId: "codex",
+          model: "gpt-5.6-sol",
+        },
+      }).stickyModelSelection,
+    ).toEqual({
+      instanceId: "codex",
+      model: "gpt-5.6-sol",
+    });
+  });
+
   it("clears sent content without clearing the selected model or workspace", () => {
     const draftKey = "environment-1:thread-1";
     const draft: ComposerDraft = {
@@ -182,7 +201,7 @@ describe("mobile composer drafts", () => {
     });
   });
 
-  it("drops the workspace selection when clearing a sent new-task draft", () => {
+  it("drops draft-local model and workspace selections after sending a new task", () => {
     const draftKey = "new-task:environment-1:project-1";
     const draft: ComposerDraft = {
       text: "send this",
@@ -201,15 +220,10 @@ describe("mobile composer drafts", () => {
 
     expect(
       clearComposerDraftContentState({ [draftKey]: draft }, draftKey, {
+        clearModelSelection: true,
         clearWorkspaceSelection: true,
       }),
-    ).toEqual({
-      [draftKey]: {
-        modelSelection: draft.modelSelection,
-        text: "",
-        attachments: [],
-      },
-    });
+    ).toEqual({});
   });
 
   it("reads the latest selector state synchronously for send", () => {
