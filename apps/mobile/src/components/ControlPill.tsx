@@ -6,14 +6,16 @@ import {
   type ComponentProps,
   type ReactElement,
   type ReactNode,
+  useMemo,
 } from "react";
-import { Platform, Pressable, useColorScheme, View } from "react-native";
+import { Platform, PlatformColor, Pressable, useColorScheme, View } from "react-native";
 import { useThemeColor } from "../lib/useThemeColor";
 
 import { cn } from "../lib/cn";
 import { AndroidAnchoredMenu } from "./AndroidAnchoredMenu";
 import { SymbolView } from "./AppSymbol";
 import { AppText as Text } from "./AppText";
+import { applyDefaultMenuImageColors } from "./menu-image-colors";
 
 export function ControlPill(props: {
   readonly icon?: ComponentProps<typeof SymbolView>["name"];
@@ -93,6 +95,16 @@ export function ControlPillMenu(
   },
 ) {
   const isDarkMode = useColorScheme() === "dark";
+  const actions = useMemo(
+    () =>
+      Platform.OS === "ios"
+        ? applyDefaultMenuImageColors(props.actions, {
+            default: PlatformColor("labelColor"),
+            destructive: PlatformColor("systemRedColor"),
+          })
+        : props.actions,
+    [props.actions],
+  );
 
   if (Platform.OS === "android") {
     // Long-press menus keep their child interactive: the child element gets
@@ -102,7 +114,7 @@ export function ControlPillMenu(
       const child = props.children as ReactElement<{ onLongPress?: () => void }>;
       return (
         <AndroidAnchoredMenu
-          actions={props.actions}
+          actions={actions}
           className={props.className}
           title={props.title}
           style={props.style}
@@ -121,7 +133,7 @@ export function ControlPillMenu(
     }
     return (
       <AndroidAnchoredMenu
-        actions={props.actions}
+        actions={actions}
         className={props.className}
         title={props.title}
         style={props.style}
@@ -132,7 +144,7 @@ export function ControlPillMenu(
     );
   }
 
-  const { className: _className, ...menuProps } = props;
+  const { actions: _actions, className: _className, ...menuProps } = props;
   let children = menuProps.children;
   // In long-press mode the wrapped pressable still receives the touch (the
   // patched MenuView button is touch-transparent) and RN's Fabric touch
@@ -150,7 +162,7 @@ export function ControlPillMenu(
     });
   }
   return (
-    <MenuView {...menuProps} themeVariant={isDarkMode ? "dark" : "light"}>
+    <MenuView {...menuProps} actions={actions} themeVariant={isDarkMode ? "dark" : "light"}>
       {children}
     </MenuView>
   );
