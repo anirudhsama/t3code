@@ -5,6 +5,7 @@ const { withUniwindConfig } = require("uniwind/metro");
 
 /** @type {import("expo/metro-config").MetroConfig} */
 const config = getDefaultConfig(__dirname);
+const getDefaultTransformOptions = config.transformer.getTransformOptions;
 const workspaceRoot = path.resolve(__dirname, "../..");
 const escapedWorkspaceRoot = workspaceRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const mobileShikiRoot = path.dirname(require.resolve("shiki/package.json", { paths: [__dirname] }));
@@ -24,6 +25,17 @@ const resolveShikiDependencyRoot = (packageName) => {
 };
 
 config.watchFolders = [...new Set([...(config.watchFolders ?? []), workspaceRoot])];
+// Keep the Android dev client from eagerly evaluating the entire mobile graph before first paint.
+config.transformer.getTransformOptions = async (entryPoints, options, getDependenciesOf) => {
+  const defaults = await getDefaultTransformOptions(entryPoints, options, getDependenciesOf);
+  return {
+    ...defaults,
+    transform: {
+      ...defaults.transform,
+      inlineRequires: options.dev && options.platform === "android",
+    },
+  };
+};
 config.resolver = {
   ...config.resolver,
   blockList: [

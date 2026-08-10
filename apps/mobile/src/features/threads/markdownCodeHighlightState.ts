@@ -4,11 +4,7 @@ import * as Effect from "effect/Effect";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useMemo } from "react";
 
-import {
-  highlightCodeSnippet,
-  type ReviewDiffTheme,
-  type ReviewHighlightedToken,
-} from "../review/shikiReviewHighlighter";
+import type { ReviewDiffTheme, ReviewHighlightedToken } from "../review/shikiReviewHighlighter";
 
 const MARKDOWN_CODE_HIGHLIGHT_IDLE_TTL_MS = 5 * 60_000;
 
@@ -37,14 +33,18 @@ export function createMarkdownCodeHighlightAtomFamily(options?: {
 }) {
   const highlight =
     options?.highlight ??
-    ((input: MarkdownCodeHighlightInput) =>
-      input.enabled
-        ? highlightCodeSnippet({
-            code: input.code,
-            language: input.language,
-            theme: input.theme,
-          })
-        : Promise.resolve(null));
+    (async (input: MarkdownCodeHighlightInput) => {
+      if (!input.enabled) {
+        return null;
+      }
+
+      const { highlightCodeSnippet } = await import("../review/shikiReviewHighlighter");
+      return highlightCodeSnippet({
+        code: input.code,
+        language: input.language,
+        theme: input.theme,
+      });
+    });
   const idleTtlMs = options?.idleTtlMs ?? MARKDOWN_CODE_HIGHLIGHT_IDLE_TTL_MS;
   const family = Atom.family((request: MarkdownCodeHighlightCacheKey) =>
     Atom.make(

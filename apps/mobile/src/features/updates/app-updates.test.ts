@@ -235,6 +235,14 @@ describe("createAppUpdateLaunchCheck", () => {
     expect(checkOnLaunch()).toBeUndefined();
     expect(client.checkForUpdateAsync).not.toHaveBeenCalled();
   });
+
+  it("does nothing when automatic launch checks are disabled", () => {
+    const client = makeUpdateClient();
+    const checkOnLaunch = createAppUpdateLaunchCheck(client, false);
+
+    expect(checkOnLaunch()).toBeUndefined();
+    expect(client.checkForUpdateAsync).not.toHaveBeenCalled();
+  });
 });
 
 describe("registerHiddenUpdateTap", () => {

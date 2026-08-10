@@ -1874,6 +1874,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             data={presentedFeed}
             extraData={listAppearanceData}
             renderItem={renderItem}
+            recycleItems
             keyExtractor={(entry) => entry.id}
             getItemType={(entry) =>
               entry.type === "message" ? `message:${entry.message.role}` : entry.type
