@@ -1,9 +1,7 @@
 import type { MenuAction } from "@react-native-menu/menu";
-import type { ColorValue } from "react-native";
-
 export function applyDefaultMenuImageColors(
   actions: readonly MenuAction[],
-  colors: { readonly default: ColorValue; readonly destructive: ColorValue },
+  colors: { readonly default: string | number; readonly destructive: string | number },
 ): MenuAction[] {
   return actions.map((action) => ({
     ...action,
