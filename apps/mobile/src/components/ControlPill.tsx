@@ -9,7 +9,7 @@ import {
   useMemo,
   useRef,
 } from "react";
-import { Platform, PlatformColor, Pressable, useColorScheme, View } from "react-native";
+import { Platform, Pressable, useColorScheme, View } from "react-native";
 import { useThemeColor } from "../lib/useThemeColor";
 
 import { cn } from "../lib/cn";
@@ -124,11 +124,14 @@ export function ControlPillMenu(
     () =>
       Platform.OS === "ios"
         ? applyDefaultMenuImageColors(props.actions, {
-            default: PlatformColor("labelColor"),
-            destructive: PlatformColor("systemRedColor"),
+            // @react-native-menu/menu's Fabric spec requires Int32 colors;
+            // semantic PlatformColor objects prevent the native menu from
+            // being created at all.
+            default: isDarkMode ? "#ffffff" : "#000000",
+            destructive: isDarkMode ? "#ff453a" : "#ff3b30",
           })
         : props.actions,
-    [props.actions],
+    [isDarkMode, props.actions],
   );
 
   if (Platform.OS === "android") {
