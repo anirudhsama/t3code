@@ -68,6 +68,7 @@ import {
   copyComposerDraftContentState,
   decodePersistedComposerState,
   decodePersistedComposerDrafts,
+  ensureComposerDraftsLoaded,
   type ComposerDraft,
   flushComposerDrafts,
   getComposerDraftSnapshot,
@@ -84,6 +85,7 @@ const DRAFT: ComposerDraft = {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
   appAtomRegistry.set(composerDraftsAtom, {});
   appAtomRegistry.set(stickyComposerModelSelectionAtom, null);
 });
@@ -170,6 +172,61 @@ describe("mobile composer drafts", () => {
     ).toEqual({
       instanceId: "codex",
       model: "gpt-5.6-sol",
+    });
+  });
+
+  it("waits for hydration before persisting the latest composer state", async () => {
+    vi.useFakeTimers();
+    let resolveRead!: (contents: string) => void;
+    let markReadStarted!: () => void;
+    let markWriteStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    composerFile.read = new Promise<string>((resolve) => {
+      resolveRead = resolve;
+    });
+    composerFile.onReadStart = markReadStarted;
+    composerFile.onWrite = markWriteStarted;
+    composerFile.writes = [];
+
+    ensureComposerDraftsLoaded();
+    await readStarted;
+    setComposerDraftText("new-task:environment-1:project-1", "New prompt");
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(composerFile.writes).toEqual([]);
+
+    resolveRead(
+      JSON.stringify({
+        schemaVersion: 1,
+        drafts: {
+          "environment-1:thread-1": DRAFT,
+        },
+        stickyModelSelection: {
+          instanceId: "codex",
+          model: "gpt-5.6-sol",
+        },
+      }),
+    );
+    await writeStarted;
+
+    expect(JSON.parse(composerFile.writes[0]!)).toEqual({
+      schemaVersion: 1,
+      drafts: {
+        "environment-1:thread-1": DRAFT,
+        "new-task:environment-1:project-1": {
+          text: "New prompt",
+          attachments: [],
+        },
+      },
+      stickyModelSelection: {
+        instanceId: "codex",
+        model: "gpt-5.6-sol",
+      },
     });
   });
 

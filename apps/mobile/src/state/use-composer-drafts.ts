@@ -258,16 +258,19 @@ export async function flushComposerDrafts(): Promise<void> {
   } while (persistTimer !== null);
 }
 
-function schedulePersistComposerState(
-  drafts: Record<string, ComposerDraft>,
-  stickyModelSelection: ModelSelection | null,
-): void {
+function schedulePersistComposerState(): void {
   if (persistTimer !== null) {
     clearTimeout(persistTimer);
   }
   persistTimer = setTimeout(() => {
     persistTimer = null;
-    void savePersistedComposerState(drafts, stickyModelSelection);
+    ensureComposerDraftsLoaded();
+    void loadPromise?.then(() =>
+      savePersistedComposerState(
+        appAtomRegistry.get(composerDraftsAtom),
+        appAtomRegistry.get(stickyComposerModelSelectionAtom),
+      ),
+    );
   }, PERSIST_DEBOUNCE_MS);
 }
 
@@ -314,12 +317,12 @@ function updateComposerDrafts(
     return;
   }
   appAtomRegistry.set(composerDraftsAtom, next);
-  schedulePersistComposerState(next, appAtomRegistry.get(stickyComposerModelSelectionAtom));
+  schedulePersistComposerState();
 }
 
 export function setStickyComposerModelSelection(modelSelection: ModelSelection): void {
   appAtomRegistry.set(stickyComposerModelSelectionAtom, modelSelection);
-  schedulePersistComposerState(appAtomRegistry.get(composerDraftsAtom), modelSelection);
+  schedulePersistComposerState();
 }
 
 export function setComposerDraftText(draftKey: string, value: string): void {
