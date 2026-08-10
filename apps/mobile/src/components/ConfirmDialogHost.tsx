@@ -57,6 +57,7 @@ export function ConfirmDialogHost() {
   const inputBackground = useThemeColor("--color-subtle");
   const inputBorder = useThemeColor("--color-border");
   const inputText = useThemeColor("--color-foreground");
+  const inputSelection = useThemeColor("--color-user-bubble");
 
   useEffect(() => {
     presentRequest = setRequest;
@@ -117,7 +118,7 @@ export function ConfirmDialogHost() {
                 onSubmitEditing={inputIsEmpty ? undefined : handleConfirm}
                 returnKeyType="done"
                 selectTextOnFocus
-                selectionColor={inputText}
+                selectionColor={inputSelection}
                 style={{
                   backgroundColor: inputBackground,
                   borderColor: inputBorder,
