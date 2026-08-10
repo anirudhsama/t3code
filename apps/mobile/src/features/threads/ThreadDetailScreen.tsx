@@ -14,6 +14,7 @@ import type {
   ServerConfig as T3ServerConfig,
   ThreadId,
 } from "@t3tools/contracts";
+import { useFocusEffect } from "@react-navigation/native";
 import * as Haptics from "expo-haptics";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Platform, View, type GestureResponderEvent } from "react-native";
@@ -232,9 +233,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const isSplitLayout = layoutVariant === "split";
   const contentMaxWidth = isSplitLayout ? CHAT_CONTENT_MAX_WIDTH : undefined;
   const selectedInstanceId = props.selectedThread.modelSelection.instanceId;
-  useEffect(() => {
-    markThreadVisited();
-  }, [markThreadVisited]);
+  useFocusEffect(
+    useCallback(() => {
+      markThreadVisited();
+    }, [markThreadVisited]),
+  );
   useStreamingHaptics(props.selectedThread.id, props.selectedThreadFeed);
   const selectedProviderSkills = useMemo(
     () =>
