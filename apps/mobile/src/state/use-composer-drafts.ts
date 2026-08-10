@@ -112,6 +112,11 @@ let loadPromise: Promise<void> | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 const persistenceQueue = new SerializedAsyncQueue();
 
+/** Resets module-level state between test runs. */
+export function resetComposerDraftsLoadState(): void {
+  loadPromise = null;
+}
+
 function normalizeDraft(draft: ComposerDraft | undefined): ComposerDraft {
   if (!draft) {
     return EMPTY_DRAFT;
@@ -149,7 +154,32 @@ export function decodePersistedComposerState(value: unknown): {
   const parsed = decodePersistedComposerDraftsDocument(value);
   return {
     drafts: Object.fromEntries(
-      Object.entries(parsed.drafts).filter(([, draft]) => !isEmptyDraft(draft)),
+      Object.entries(parsed.drafts)
+        .map(
+          ([key, draft]) =>
+            [
+              key,
+              // Stale new-task drafts left on disk by builds before the
+              // model-precedence fix carry a bare modelSelection with no
+              // other selector settings. Strip it so the next compose pass
+              // re-resolves project → sticky → provider defaults. Drafts
+              // with runtime/interaction/workspace settings or actual text /
+              // attachments were deliberately configured and are left alone.
+              key.startsWith("new-task:") &&
+              draft.modelSelection &&
+              draft.text.length === 0 &&
+              draft.attachments.length === 0 &&
+              draft.runtimeMode === undefined &&
+              draft.interactionMode === undefined &&
+              draft.workspaceSelection === undefined
+                ? { ...draft, modelSelection: undefined }
+                : draft,
+            ] as const,
+        )
+        // importedShareIds are share-import receipts: a contentless draft
+        // carrying one is not empty, or the same native share would be
+        // re-imported after restart.
+        .filter(([, draft]) => !isEmptyDraft(draft) || (draft.importedShareIds?.length ?? 0) > 0),
     ),
     stickyModelSelection: parsed.stickyModelSelection ?? null,
   };
@@ -223,24 +253,18 @@ async function writePersistedComposerState(
   }
 }
 
-async function savePersistedComposerState(
-  drafts: Record<string, ComposerDraft>,
-  stickyModelSelection: ModelSelection | null,
-): Promise<void> {
-  try {
-    await persistenceQueue.run(() => writePersistedComposerState(drafts, stickyModelSelection));
-  } catch (error) {
-    console.warn("[composer-drafts] failed to persist drafts", error);
-    // Draft persistence is best-effort; in-memory drafts still keep working.
-  }
-}
-
 /**
  * Lands any debounced or in-flight draft write before the JS runtime is torn
  * down (app update restart), so the freshest draft state survives it. A write
  * failure propagates so the caller can decide whether the restart may proceed.
  */
 export async function flushComposerDrafts(): Promise<void> {
+  // Never land a pre-hydration snapshot: persisted state must merge into the
+  // atoms first, or this write would clobber disk with partial data.
+  ensureComposerDraftsLoaded();
+  if (loadPromise !== null) {
+    await loadPromise;
+  }
   // An edit during an awaited write schedules another debounced write, so
   // keep landing snapshots until no debounce is pending after a queue drain.
   do {
@@ -254,6 +278,8 @@ export async function flushComposerDrafts(): Promise<void> {
         ),
       );
     }
+    // Draining also waits for an already-fired debounce whose write is still
+    // gated behind its own hydration await inside the queue.
     await persistenceQueue.run(() => Promise.resolve());
   } while (persistTimer !== null);
 }
@@ -265,12 +291,22 @@ function schedulePersistComposerState(): void {
   persistTimer = setTimeout(() => {
     persistTimer = null;
     ensureComposerDraftsLoaded();
-    void loadPromise?.then(() =>
-      savePersistedComposerState(
-        appAtomRegistry.get(composerDraftsAtom),
-        appAtomRegistry.get(stickyComposerModelSelectionAtom),
-      ),
-    );
+    // The write enters the serialization queue before waiting on hydration,
+    // so flushComposerDrafts' queue drain cannot resolve ahead of it.
+    void persistenceQueue.run(async () => {
+      if (loadPromise !== null) {
+        await loadPromise;
+      }
+      try {
+        await writePersistedComposerState(
+          appAtomRegistry.get(composerDraftsAtom),
+          appAtomRegistry.get(stickyComposerModelSelectionAtom),
+        );
+      } catch (error) {
+        console.warn("[composer-drafts] failed to persist drafts", error);
+        // Draft persistence is best-effort; in-memory drafts still keep working.
+      }
+    });
   }, PERSIST_DEBOUNCE_MS);
 }
 
@@ -706,7 +742,9 @@ export async function clearComposerDraftsEnvironment(environmentId: EnvironmentI
     persistTimer = null;
   }
   appAtomRegistry.set(composerDraftsAtom, next);
-  await writePersistedComposerState(next, appAtomRegistry.get(stickyComposerModelSelectionAtom));
+  await persistenceQueue.run(() =>
+    writePersistedComposerState(next, appAtomRegistry.get(stickyComposerModelSelectionAtom)),
+  );
 }
 
 export function useComposerDraft(draftKey: string | null): ComposerDraft {

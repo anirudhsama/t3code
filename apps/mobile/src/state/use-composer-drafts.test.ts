@@ -7,6 +7,9 @@ const composerDraftFileMocks = vi.hoisted(() => {
   let writeError: Error | null = null;
   let releaseRead: (() => void) | null = null;
   let readBarrier = Promise.resolve();
+  let nextWriteBarrier: Promise<void> | null = null;
+  let onWrite: (() => void) | null = null;
+  const writes: string[] = [];
 
   return {
     blockRead() {
@@ -26,6 +29,18 @@ const composerDraftFileMocks = vi.hoisted(() => {
     },
     setWriteError(error: Error | null) {
       writeError = error;
+    },
+    setNextWriteBarrier(barrier: Promise<void> | null) {
+      nextWriteBarrier = barrier;
+    },
+    setOnWrite(callback: (() => void) | null) {
+      onWrite = callback;
+    },
+    getWrites(): ReadonlyArray<string> {
+      return writes;
+    },
+    resetWrites() {
+      writes.length = 0;
     },
     Directory: class {
       create() {}
@@ -47,7 +62,18 @@ const composerDraftFileMocks = vi.hoisted(() => {
         if (writeError) {
           throw writeError;
         }
+        if (nextWriteBarrier) {
+          const barrier = nextWriteBarrier;
+          nextWriteBarrier = null;
+          return barrier.then(() => {
+            document = value;
+            writes.push(value);
+            onWrite?.();
+          });
+        }
         document = value;
+        writes.push(value);
+        onWrite?.();
       }
     },
   };
@@ -62,6 +88,7 @@ vi.mock("expo-file-system", () => ({
 import { appAtomRegistry } from "./atom-registry";
 import {
   clearComposerDraftContentState,
+  clearComposerDraftsEnvironment,
   ComposerDraftPersistenceError,
   composerDraftsAtom,
   copyComposerDraftContentIfEmpty,
@@ -74,8 +101,10 @@ import {
   getComposerDraftSnapshot,
   mergeComposerDraftContentState,
   removeComposerDraftsForEnvironment,
+  resetComposerDraftsLoadState,
   restoreComposerDraftSnapshotState,
   setComposerDraftText,
+  setStickyComposerModelSelection,
   stickyComposerModelSelectionAtom,
 } from "./use-composer-drafts";
 
@@ -86,6 +115,12 @@ const DRAFT: ComposerDraft = {
 
 afterEach(() => {
   vi.useRealTimers();
+  resetComposerDraftsLoadState();
+  composerDraftFileMocks.setDocument("");
+  composerDraftFileMocks.setWriteError(null);
+  composerDraftFileMocks.setNextWriteBarrier(null);
+  composerDraftFileMocks.setOnWrite(null);
+  composerDraftFileMocks.resetWrites();
   appAtomRegistry.set(composerDraftsAtom, {});
   appAtomRegistry.set(stickyComposerModelSelectionAtom, null);
 });
@@ -159,6 +194,44 @@ describe("mobile composer drafts", () => {
     ).toThrow();
   });
 
+  it("keeps share-import receipts on otherwise contentless new-task drafts", () => {
+    const receiptDraft: ComposerDraft = {
+      text: "",
+      attachments: [],
+      importedShareIds: ["share-1"],
+    };
+    // The stale-model strip must not touch receipt-bearing drafts, and the
+    // empty filter must keep them — or the same share would re-import after
+    // restart.
+    expect(
+      decodePersistedComposerState({
+        schemaVersion: 1,
+        drafts: {
+          "new-task:environment-1:project-1": {
+            ...receiptDraft,
+            modelSelection: {
+              instanceId: "codex",
+              model: "gpt-5.4",
+            },
+          },
+        },
+      }).drafts,
+    ).toEqual({
+      "new-task:environment-1:project-1": {
+        text: "",
+        attachments: [],
+        importedShareIds: ["share-1"],
+      },
+    });
+
+    expect(
+      decodePersistedComposerState({
+        schemaVersion: 1,
+        drafts: { "new-task:environment-1:project-1": receiptDraft },
+      }).drafts,
+    ).toEqual({ "new-task:environment-1:project-1": receiptDraft });
+  });
+
   it("hydrates the global sticky model selection", () => {
     expect(
       decodePersistedComposerState({
@@ -177,44 +250,33 @@ describe("mobile composer drafts", () => {
 
   it("waits for hydration before persisting the latest composer state", async () => {
     vi.useFakeTimers();
-    let resolveRead!: (contents: string) => void;
-    let markReadStarted!: () => void;
-    let markWriteStarted!: () => void;
-    const readStarted = new Promise<void>((resolve) => {
-      markReadStarted = resolve;
+    composerDraftFileMocks.setDocument({
+      schemaVersion: 1,
+      drafts: {
+        "environment-1:thread-1": DRAFT,
+      },
+      stickyModelSelection: {
+        instanceId: "codex",
+        model: "gpt-5.6-sol",
+      },
     });
-    const writeStarted = new Promise<void>((resolve) => {
-      markWriteStarted = resolve;
-    });
-    composerFile.read = new Promise<string>((resolve) => {
-      resolveRead = resolve;
-    });
-    composerFile.onReadStart = markReadStarted;
-    composerFile.onWrite = markWriteStarted;
-    composerFile.writes = [];
+    composerDraftFileMocks.blockRead();
+    composerDraftFileMocks.resetWrites();
 
     ensureComposerDraftsLoaded();
-    await readStarted;
+    await Promise.resolve();
+    // The read is blocked, hydration is pending.
     setComposerDraftText("new-task:environment-1:project-1", "New prompt");
     await vi.advanceTimersByTimeAsync(200);
 
-    expect(composerFile.writes).toEqual([]);
+    // Write should still be deferred — hydration has not resolved.
+    expect(composerDraftFileMocks.getWrites()).toHaveLength(0);
 
-    resolveRead(
-      JSON.stringify({
-        schemaVersion: 1,
-        drafts: {
-          "environment-1:thread-1": DRAFT,
-        },
-        stickyModelSelection: {
-          instanceId: "codex",
-          model: "gpt-5.6-sol",
-        },
-      }),
-    );
-    await writeStarted;
+    composerDraftFileMocks.releaseRead();
+    // Let the loadPromise settle and chain into the deferred persist.
+    await vi.runAllTimersAsync();
 
-    expect(JSON.parse(composerFile.writes[0]!)).toEqual({
+    expect(JSON.parse(composerDraftFileMocks.getWrites()[0]!)).toEqual({
       schemaVersion: 1,
       drafts: {
         "environment-1:thread-1": DRAFT,
@@ -222,6 +284,97 @@ describe("mobile composer drafts", () => {
           text: "New prompt",
           attachments: [],
         },
+      },
+      stickyModelSelection: {
+        instanceId: "codex",
+        model: "gpt-5.6-sol",
+      },
+    });
+  });
+
+  it("flush waits for pending hydration instead of clobbering disk", async () => {
+    vi.useFakeTimers();
+    composerDraftFileMocks.setDocument({
+      schemaVersion: 1,
+      drafts: {
+        "environment-1:thread-1": DRAFT,
+      },
+      stickyModelSelection: {
+        instanceId: "codex",
+        model: "gpt-5.6-sol",
+      },
+    });
+    composerDraftFileMocks.blockRead();
+    composerDraftFileMocks.resetWrites();
+
+    ensureComposerDraftsLoaded();
+    await Promise.resolve();
+    // An edit lands before hydration finishes; its debounced write is gated
+    // behind the blocked read.
+    setComposerDraftText("new-task:environment-1:project-1", "New prompt");
+
+    const flush = flushComposerDrafts();
+    await vi.advanceTimersByTimeAsync(200);
+    // The flush must not have written the pre-hydration snapshot over disk.
+    expect(composerDraftFileMocks.getWrites()).toHaveLength(0);
+
+    composerDraftFileMocks.releaseRead();
+    await flush;
+
+    const written = JSON.parse(composerDraftFileMocks.getDocument());
+    expect(written.drafts["environment-1:thread-1"]).toEqual(DRAFT);
+    expect(written.drafts["new-task:environment-1:project-1"]).toEqual({
+      text: "New prompt",
+      attachments: [],
+    });
+    expect(written.stickyModelSelection).toEqual({
+      instanceId: "codex",
+      model: "gpt-5.6-sol",
+    });
+  });
+
+  it("serializes environment cleanup after an older queued write", async () => {
+    vi.useFakeTimers();
+    composerDraftFileMocks.setDocument(JSON.stringify({ schemaVersion: 1, drafts: {} }));
+    composerDraftFileMocks.resetWrites();
+    let releaseFirstWrite!: () => void;
+    const firstWriteBarrier = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    composerDraftFileMocks.setNextWriteBarrier(firstWriteBarrier);
+    let writeCount = 0;
+    const bothWritesCommitted = new Promise<void>((resolve) => {
+      composerDraftFileMocks.setOnWrite(() => {
+        writeCount += 1;
+        if (writeCount === 2) {
+          resolve();
+        }
+      });
+    });
+
+    appAtomRegistry.set(composerDraftsAtom, {
+      "environment-1:thread-1": DRAFT,
+      "environment-2:thread-2": { text: "keep", attachments: [] },
+    });
+    setStickyComposerModelSelection({
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.6-sol",
+    });
+    await vi.advanceTimersByTimeAsync(200);
+
+    const clear = clearComposerDraftsEnvironment(EnvironmentId.make("environment-1"));
+    await Promise.resolve();
+    // Cleanup write is queued behind the still-blocked debounced write.
+    expect(composerDraftFileMocks.getWrites()).toHaveLength(0);
+
+    releaseFirstWrite();
+    await clear;
+    await bothWritesCommitted;
+
+    expect(JSON.parse(composerDraftFileMocks.getDocument())).toEqual({
+      schemaVersion: 1,
+      drafts: {
+        "environment-2:thread-2": { text: "keep", attachments: [] },
       },
       stickyModelSelection: {
         instanceId: "codex",
