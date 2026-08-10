@@ -511,8 +511,12 @@ interface CodexAdapterSessionContext {
   readonly eventFiber: Fiber.Fiber<void, never>;
   managementIdleFiber: Fiber.Fiber<void, never> | undefined;
   managementLeaseCount: number;
+  turnDispatchCount: number;
+  turnActive: boolean;
+  turnLifecycleRevision: number;
   starting: boolean;
   started: boolean;
+  retired: boolean;
   stopped: boolean;
 }
 
@@ -2308,6 +2312,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           }
           return;
         }
+        for (const runtimeEvent of runtimeEvents) {
+          if (runtimeEvent.type === "turn.started") {
+            context.turnActive = true;
+          } else if (
+            runtimeEvent.type === "turn.completed" ||
+            runtimeEvent.type === "session.exited"
+          ) {
+            context.turnActive = false;
+            context.turnLifecycleRevision += 1;
+          }
+        }
         yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
       }),
     ).pipe(Effect.forkIn(sessionScope));
@@ -2322,8 +2337,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       eventFiber,
       managementIdleFiber: undefined,
       managementLeaseCount: 0,
+      turnDispatchCount: 0,
+      turnActive: false,
+      turnLifecycleRevision: 0,
       starting: false,
       started: false,
+      retired: false,
       stopped: false,
     };
     sessions.set(runtimeInput.threadId, context);
@@ -2341,7 +2360,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       yield* Fiber.interrupt(session.managementIdleFiber).pipe(Effect.ignore);
       session.managementIdleFiber = undefined;
     }
-    sessions.delete(session.threadId);
+    if (sessions.get(session.threadId) === session) {
+      sessions.delete(session.threadId);
+    }
     mcpStatusCache.cache.delete(session.threadId);
     mcpNotificationStatus.delete(session.threadId);
     mcpNotificationRevision.delete(session.threadId);
@@ -2351,14 +2372,38 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
   });
 
+  const retireOrStopContext = Effect.fnUntraced(function* (context: CodexAdapterSessionContext) {
+    if (context.managementLeaseCount === 0) {
+      yield* stopSessionInternal(context);
+      return;
+    }
+    context.retired = true;
+    if (context.managementIdleFiber) {
+      yield* Fiber.interrupt(context.managementIdleFiber).pipe(Effect.ignore);
+      context.managementIdleFiber = undefined;
+    }
+    if (sessions.get(context.threadId) === context) {
+      sessions.delete(context.threadId);
+    }
+  });
+
   const releaseManagementContext = Effect.fn("CodexAdapter.releaseManagementContext")(function* (
     context: CodexAdapterSessionContext,
   ) {
     context.managementLeaseCount = Math.max(0, context.managementLeaseCount - 1);
+    if (context.retired) {
+      if (context.managementLeaseCount === 0) {
+        yield* stopSessionInternal(context);
+      }
+      return;
+    }
     if (
       context.managementLeaseCount > 0 ||
       context.started ||
       context.starting ||
+      context.turnDispatchCount > 0 ||
+      context.turnActive ||
+      context.retired ||
       context.stopped
     ) {
       return;
@@ -2373,6 +2418,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             context.managementLeaseCount > 0 ||
             context.started ||
             context.starting ||
+            context.turnDispatchCount > 0 ||
+            context.turnActive ||
+            context.retired ||
             context.stopped
           ) {
             return Effect.void;
@@ -2415,7 +2463,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     if (existing && !existing.stopped) {
       skillInventoryCache.cache.delete(cacheKey(existing.cwd));
       mcpDefinitionCache.cache.delete(cacheKey(existing.cwd));
-      yield* Effect.suspend(() => stopSessionInternal(existing));
+      yield* retireOrStopContext(existing);
     }
 
     return yield* createSessionContext(
@@ -2450,8 +2498,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         context.cwd === cwd &&
         context.mcpProviderSessionId === mcpProviderSessionId;
       if (context && !context.stopped && !reusePreparedRuntime) {
+        if (context.turnDispatchCount > 0 || context.turnActive) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/replace",
+            detail: "Cannot replace a Codex runtime while a turn is pending or active.",
+          });
+        }
         mcpDefinitionCache.cache.delete(cacheKey(context.cwd));
-        yield* stopSessionInternal(context);
+        yield* retireOrStopContext(context);
         context = undefined;
       }
       if (!context) {
@@ -2996,32 +3051,47 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
 
     const session = yield* requireSession(input.threadId);
-    const selectedSkills = yield* validateSelectedSkills(input, session);
-    const reasoningEffort =
-      input.modelSelection?.instanceId === boundInstanceId
-        ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
-        : undefined;
-    const serviceTier =
-      input.modelSelection?.instanceId === boundInstanceId
-        ? getCodexServiceTierOptionValue(input.modelSelection)
-        : undefined;
-    return yield* session.runtime
-      .sendTurn({
-        ...(input.input !== undefined ? { input: input.input } : {}),
-        ...(input.modelSelection?.instanceId === boundInstanceId
-          ? { model: input.modelSelection.model }
-          : {}),
-        ...(reasoningEffort
-          ? {
-              effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
-            }
-          : {}),
-        ...(serviceTier ? { serviceTier } : {}),
-        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-        ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
-        ...(selectedSkills.length > 0 ? { selectedSkills } : {}),
-      })
-      .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
+    const turnWasActive = session.turnActive;
+    const lifecycleRevision = session.turnLifecycleRevision;
+    session.turnDispatchCount += 1;
+    session.turnActive = true;
+    const dispatched = yield* Effect.gen(function* () {
+      const selectedSkills = yield* validateSelectedSkills(input, session);
+      const reasoningEffort =
+        input.modelSelection?.instanceId === boundInstanceId
+          ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
+          : undefined;
+      const serviceTier =
+        input.modelSelection?.instanceId === boundInstanceId
+          ? getCodexServiceTierOptionValue(input.modelSelection)
+          : undefined;
+      return yield* session.runtime
+        .sendTurn({
+          ...(input.input !== undefined ? { input: input.input } : {}),
+          ...(input.modelSelection?.instanceId === boundInstanceId
+            ? { model: input.modelSelection.model }
+            : {}),
+          ...(reasoningEffort
+            ? {
+                effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
+              }
+            : {}),
+          ...(serviceTier ? { serviceTier } : {}),
+          ...(input.interactionMode !== undefined
+            ? { interactionMode: input.interactionMode }
+            : {}),
+          ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+          ...(selectedSkills.length > 0 ? { selectedSkills } : {}),
+        })
+        .pipe(
+          Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)),
+        );
+    }).pipe(Effect.exit);
+    session.turnDispatchCount = Math.max(0, session.turnDispatchCount - 1);
+    if (Exit.isFailure(dispatched) && session.turnLifecycleRevision === lifecycleRevision) {
+      session.turnActive = turnWasActive;
+    }
+    return yield* dispatched;
   });
 
   const requireSession = Effect.fn("requireSession")(function* (threadId: ThreadId) {

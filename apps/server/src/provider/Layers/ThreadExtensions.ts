@@ -328,12 +328,20 @@ export const makeThreadExtensions = Effect.fn("makeThreadExtensions")(
       }
       const instance = yield* requireInstance(input.providerInstanceId);
       const cwd = yield* resolveProjectCwd(projectOption.value);
+      const modelSelection =
+        projectOption.value.defaultModelSelection?.instanceId === input.providerInstanceId
+          ? projectOption.value.defaultModelSelection
+          : undefined;
       return {
         threadId: input.threadId,
         projectId: input.projectId,
         cwd,
         instance,
-        runtime: { threadId: input.threadId, cwd },
+        runtime: {
+          threadId: input.threadId,
+          cwd,
+          ...(modelSelection ? { modelSelection } : {}),
+        },
         thread: {
           skillOverrides: {},
           mcpOverrides: {},

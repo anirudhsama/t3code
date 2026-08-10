@@ -18,6 +18,7 @@ import type {
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderExtensionItemId,
   ProviderItemId,
@@ -39,6 +40,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
@@ -87,6 +89,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public applyFlagSettingsImpl: ((settings: Partial<Settings>) => Promise<void>) | undefined;
   public toggleMcpServerFailure: unknown | undefined;
   public setPermissionModeFailure: unknown | undefined;
+  public setPermissionModeImpl: ((mode: PermissionMode) => Promise<void>) | undefined;
   public setMcpServersErrors: Record<string, string> = {};
   public closeCalls = 0;
 
@@ -138,6 +141,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly setPermissionMode = async (mode: PermissionMode): Promise<void> => {
     this.setPermissionModeCalls.push(mode);
+    await this.setPermissionModeImpl?.(mode);
     if (this.setPermissionModeFailure !== undefined) throw this.setPermissionModeFailure;
   };
 
@@ -4587,6 +4591,135 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("adopts a preview Query after durable MCP provisioning", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const cwd = "/tmp/claude-adapter-test";
+      yield* adapter.extensions.skills!.inventory({
+        threadId: THREAD_ID,
+        cwd,
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-sonnet-4-6",
+        ),
+      });
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-test"),
+        threadId: THREAD_ID,
+        providerSessionId: "mcp-session-test",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        endpoint: "http://127.0.0.1:43121/mcp",
+        authorizationHeader: "Bearer test",
+      });
+
+      yield* adapter.extensions.skills!.inventory({
+        threadId: THREAD_ID,
+        cwd,
+        forceReload: true,
+      });
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd,
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-sonnet-4-6",
+        ),
+      });
+
+      assert.equal(harness.getCreateQueryCallCount(), 1);
+      assert.equal(harness.query.closeCalls, 0);
+      assert.equal(harness.query.setMcpServersCalls.length, 1);
+      assert.property(harness.query.setMcpServersCalls[0]!, "t3-code");
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(THREAD_ID))),
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps a Query owned while its first turn is being dispatched", () => {
+    let releasePermission!: () => void;
+    const permissionGate = new Promise<void>((resolve) => {
+      releasePermission = resolve;
+    });
+    let markPermissionStarted!: () => void;
+    const permissionStarted = new Promise<void>((resolve) => {
+      markPermissionStarted = resolve;
+    });
+    const harness = makeHarness({ queryFactory: () => new FakeClaudeQuery() });
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-adapter-test",
+      });
+      const query = harness.queries[0]!;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-adapter-test",
+        extensionOverrides: { skills: {}, mcp: {}, revision: 0 },
+      });
+      assert.equal(harness.queries.length, 1);
+      assert.equal(query.closeCalls, 0);
+      query.setPermissionModeImpl = async (mode) => {
+        if (mode !== "plan") return;
+        markPermissionStarted();
+        await permissionGate;
+        if (query.closeCalls > 0) throw new Error("Query closed before response received");
+      };
+
+      const turnFiber = yield* adapter
+        .sendTurn({
+          threadId: THREAD_ID,
+          input: "first turn",
+          attachments: [],
+          interactionMode: "plan",
+        })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => permissionStarted);
+
+      const duplicate = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-adapter-test",
+      });
+      assert.equal(duplicate.threadId, THREAD_ID);
+      assert.equal(harness.queries.length, 1);
+      assert.equal(query.closeCalls, 0);
+
+      const incompatible = yield* adapter
+        .startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          cwd: "/tmp/claude-adapter-test/other",
+        })
+        .pipe(Effect.result);
+      assert.equal(incompatible._tag, "Failure");
+      if (incompatible._tag === "Failure") {
+        assert.equal(incompatible.failure._tag, "ProviderAdapterRequestError");
+      }
+      assert.equal(query.closeCalls, 0);
+
+      releasePermission();
+      yield* Fiber.join(turnFiber);
+      assert.equal(query.closeCalls, 0);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("rearms idle cleanup when prepared-query adoption fails", () => {
     const harness = makeHarness({ managementIdleTimeoutMs: 1_000 });
     return Effect.gen(function* () {
@@ -4742,6 +4875,7 @@ describe("ClaudeAdapterLive", () => {
         runtimeMode: "full-access",
         cwd: "/tmp/claude-adapter-test/.t3/worktrees/new-thread",
       });
+      assert.equal(harness.queries[0]?.closeCalls, 0);
       const currentRefresh = yield* adapter.extensions
         .skills!.refresh({
           threadId: THREAD_ID,
@@ -4763,6 +4897,10 @@ describe("ClaudeAdapterLive", () => {
         harness.queries.map((query) => query.reloadSkillsCalls),
         [1, 1],
       );
+      assert.equal(harness.queries[0]?.closeCalls, 1);
+      assert.equal(harness.queries[1]?.closeCalls, 0);
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "first turn", attachments: [] });
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

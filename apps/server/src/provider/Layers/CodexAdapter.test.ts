@@ -1616,6 +1616,113 @@ it.effect("does not let project discovery replace a worktree first-turn session"
   );
 });
 
+it.effect("does not replace a runtime while its first turn is being dispatched", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const threadId = asThreadId("thread-pending-first-turn");
+  let releaseTurn!: () => void;
+  const turnGate = new Promise<void>((resolve) => {
+    releaseTurn = resolve;
+  });
+  let markTurnStarted!: () => void;
+  const turnStarted = new Promise<void>((resolve) => {
+    markTurnStarted = resolve;
+  });
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        cwd: "/workspace/project",
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime!;
+      runtime.sendTurnImpl.mockImplementation(async () => {
+        markTurnStarted();
+        await turnGate;
+        if (runtime.closeImpl.mock.calls.length > 0) {
+          throw new Error("runtime closed before response received");
+        }
+        return { threadId, turnId: asTurnId("turn-pending") };
+      });
+
+      const turnFiber = yield* adapter
+        .sendTurn({ threadId, input: "first turn" })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => turnStarted);
+
+      const replacement = yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          cwd: "/workspace/project/other",
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(replacement._tag, "Failure");
+      if (replacement._tag === "Failure") {
+        NodeAssert.equal(replacement.failure._tag, "ProviderAdapterRequestError");
+      }
+      NodeAssert.equal(runtime.closeImpl.mock.calls.length, 0);
+
+      releaseTurn();
+      yield* Fiber.join(turnFiber);
+      NodeAssert.equal(runtimeFactory.runtimes.length, 1);
+      NodeAssert.equal(runtime.closeImpl.mock.calls.length, 0);
+      NodeAssert.equal(yield* adapter.hasSession(threadId), true);
+    }),
+  );
+});
+
+it.effect("retires an in-use preview runtime without deleting its replacement", () => {
+  const threadId = asThreadId("thread-preview-handoff");
+  let releaseInventory!: () => void;
+  const inventoryGate = new Promise<void>((resolve) => {
+    releaseInventory = resolve;
+  });
+  let markInventoryStarted!: () => void;
+  const inventoryStarted = new Promise<void>((resolve) => {
+    markInventoryStarted = resolve;
+  });
+  let runtimeIndex = 0;
+  const runtimeFactory = makeRuntimeFactory((runtime) => {
+    if (runtimeIndex++ !== 0) return;
+    runtime.listSkillsImpl.mockImplementation(async (input) => {
+      markInventoryStarted();
+      await inventoryGate;
+      return { data: [{ cwd: input.cwd, skills: [], errors: [] }] };
+    });
+  });
+
+  return withExtensionsTestAdapter(runtimeFactory, (adapter) =>
+    Effect.gen(function* () {
+      const inventoryFiber = yield* adapter.extensions
+        .skills!.inventory({ threadId, cwd: "/workspace/project" })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => inventoryStarted);
+      const previewRuntime = runtimeFactory.runtimes[0]!;
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        cwd: "/workspace/project/.t3/worktrees/new-thread",
+        runtimeMode: "full-access",
+      });
+      const replacementRuntime = runtimeFactory.runtimes[1]!;
+      NodeAssert.equal(previewRuntime.closeImpl.mock.calls.length, 0);
+
+      releaseInventory();
+      yield* Fiber.join(inventoryFiber);
+      yield* Effect.yieldNow;
+      NodeAssert.equal(previewRuntime.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(replacementRuntime.closeImpl.mock.calls.length, 0);
+      NodeAssert.equal(yield* adapter.hasSession(threadId), true);
+      yield* adapter.sendTurn({ threadId, input: "first turn" });
+      NodeAssert.equal(replacementRuntime.sendTurnImpl.mock.calls.length, 1);
+    }),
+  );
+});
+
 it.effect("records overrides without starting a runtime when no session is active", () => {
   const runtimeFactory = makeRuntimeFactory();
   return withExtensionsTestAdapter(runtimeFactory, (adapter) =>

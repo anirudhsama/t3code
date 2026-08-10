@@ -287,9 +287,24 @@ describe("ThreadExtensions", () => {
   it.effect("resolves draft preview cwd from project identity and rejects existing threads", () =>
     Effect.gen(function* () {
       const pendingId = ThreadId.make("pending-thread");
+      let previewModel: string | undefined;
+      const base = makeInstance("idle");
       const service = yield* makeService({
         threads: new Map([[THREAD_ID, thread()]]),
         active: false,
+        instance: {
+          ...base,
+          extensions: {
+            ...base.extensions!,
+            skills: {
+              ...base.extensions!.skills!,
+              inventory: (input) => {
+                previewModel = input.modelSelection?.model;
+                return base.extensions!.skills!.inventory(input);
+              },
+            },
+          },
+        },
       });
       const preview = yield* service.previewSnapshot({
         threadId: pendingId,
@@ -299,6 +314,7 @@ describe("ThreadExtensions", () => {
       expect(preview.threadId).toBe(pendingId);
       expect(preview.cwd).toBe(process.cwd());
       expect(preview.overrideRevision).toBe(0);
+      expect(previewModel).toBe("gpt-5-codex");
 
       const error = yield* service
         .previewSnapshot({

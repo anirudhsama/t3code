@@ -39,6 +39,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderUnsupportedError,
   ProviderValidationError,
@@ -1362,6 +1363,48 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(startPayload.threadId, initial.threadId);
       }
       assert.equal(routing.claude.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("revalidates and recovers when a routed session closes before dispatch", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-closed-before-dispatch");
+
+      yield* provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        cwd: "/tmp/project-closed-before-dispatch",
+        runtimeMode: "full-access",
+      });
+      routing.claude.startSession.mockClear();
+      routing.claude.stopSession.mockClear();
+      routing.claude.sendTurn.mockClear();
+      routing.claude.sendTurn.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterSessionClosedError({
+            provider: CLAUDE_AGENT_DRIVER,
+            threadId,
+            cause: new Error("Query closed before response received"),
+          }),
+        ),
+      );
+
+      const turn = yield* provider.sendTurn({
+        threadId,
+        input: "recover this dispatch",
+        attachments: [],
+      });
+
+      assert.equal(turn.threadId, threadId);
+      assert.equal(routing.claude.sendTurn.mock.calls.length, 2);
+      assert.deepEqual(routing.claude.stopSession.mock.calls, [[threadId]]);
+      assert.equal(routing.claude.startSession.mock.calls.length, 1);
+      assert.equal(
+        routing.claude.startSession.mock.calls[0]?.[0]?.cwd,
+        "/tmp/project-closed-before-dispatch",
+      );
     }),
   );
 
