@@ -69,10 +69,12 @@ function threadTimeLabel(thread: EnvironmentThreadShell): string {
 }
 
 // Lifecycle actions are composed with the shared per-thread actions below.
-const CARD_MENU_ACTIONS: MenuAction[] = [{ id: "settle", title: "Settle", image: "checkmark" }];
+const CARD_MENU_ACTIONS: MenuAction[] = [
+  { id: "settle", title: "Settle thread", image: "checkmark" },
+];
 
 const SLIM_MENU_ACTIONS: MenuAction[] = [
-  { id: "unsettle", title: "Un-settle", image: "arrow.uturn.backward" },
+  { id: "unsettle", title: "Un-settle thread", image: "arrow.uturn.backward" },
 ];
 
 const SNOOZED_MENU_ACTIONS: MenuAction[] = [
@@ -81,7 +83,7 @@ const SNOOZED_MENU_ACTIONS: MenuAction[] = [
 
 // Pre-settlement servers: no lifecycle items, archive fills the gap.
 const LEGACY_MENU_ACTIONS: MenuAction[] = [
-  { id: "archive", title: "Archive", image: "archivebox" },
+  { id: "archive", title: "Archive thread", image: "archivebox" },
 ];
 
 /** Rounded-row radius shared with the v1 sidebar rows. */
@@ -463,6 +465,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     if (thread.branch === null) return;
     copyTextWithHaptic(thread.branch, { target: "thread branch", feedback: "selection" });
   }, [thread.branch]);
+  const handleCopyThreadId = useCallback(() => {
+    copyTextWithHaptic(thread.id, { target: "thread ID", feedback: "selection" });
+  }, [thread.id]);
 
   // Swipe: the v2 primary action is the lifecycle transition. Every settled
   // row can un-settle — explicit settles clear the override, auto-settled
@@ -522,8 +527,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                 ]
               : []),
             pinnedRow
-              ? { id: "unpin", title: "Unpin", image: "pin.slash" }
-              : { id: "pin", title: "Pin", image: "pin" },
+              ? { id: "unpin", title: "Unpin thread", image: "pin.slash" }
+              : { id: "pin", title: "Pin thread", image: "pin" },
           ]
         : [],
     [
@@ -534,21 +539,22 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       props.pinningSupported,
     ],
   );
+  // Web menu order: pin block first, then the settle/snooze lifecycle.
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () => [
-      { id: "settle", title: "Settle", image: "checkmark" },
+      ...pinMenuItem,
+      { id: "settle", title: "Settle thread", image: "checkmark" },
       {
         id: "snooze",
         title: "Snooze",
         image: "clock",
         subactions: snoozePresetActions,
       },
-      ...pinMenuItem,
     ],
     [pinMenuItem, snoozePresetActions],
   );
   const cardMenuActions = useMemo<MenuAction[]>(
-    () => [CARD_MENU_ACTIONS[0]!, ...pinMenuItem],
+    () => [...pinMenuItem, CARD_MENU_ACTIONS[0]!],
     [pinMenuItem],
   );
   const lifecycleMenuActions = snoozedRow
@@ -566,8 +572,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         thread,
         lifecycleActions: lifecycleMenuActions,
         titleRegenerationSupported: props.titleRegenerationSupported,
+        // Legacy rows already carry Archive as their lifecycle fallback.
+        showArchiveAction: props.settlementSupported,
+        isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
       }),
-    [lifecycleMenuActions, props.titleRegenerationSupported, thread],
+    [lifecycleMenuActions, props.settlementSupported, props.titleRegenerationSupported, thread],
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -585,6 +594,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "mark-unread") markThreadUnread();
       if (nativeEvent.event === "copy-path") handleCopyPath();
       if (nativeEvent.event === "copy-branch") handleCopyBranch();
+      if (nativeEvent.event === "copy-thread-id") handleCopyThreadId();
       if (nativeEvent.event === "delete") handleDelete();
       const snoozeSelection = resolveThreadListV2SnoozeMenuSelection({
         event: nativeEvent.event,
@@ -601,6 +611,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       handleArchive,
       handleCopyBranch,
       handleCopyPath,
+      handleCopyThreadId,
       handleDelete,
       handleMovePinnedDown,
       handleMovePinnedUp,
