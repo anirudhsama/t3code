@@ -361,6 +361,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly onUnpinThread: (thread: EnvironmentThreadShell) => void;
   readonly onNewThreadFromThread: (thread: EnvironmentThreadShell) => void;
   readonly onRenameThread: (thread: EnvironmentThreadShell) => void;
+  readonly onRegenerateThreadTitle: (thread: EnvironmentThreadShell) => void;
   /** False on environments whose server predates thread.settle/unsettle:
       swipe + menu fall back to Archive instead of failing on use. */
   readonly settlementSupported: boolean;
