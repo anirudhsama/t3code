@@ -1835,6 +1835,42 @@ describe("composerDraftStore model seed migration", () => {
     await useComposerDraftStore.persist.clearStorage();
   });
 
+  it.each([1, 2])(
+    "keeps the legacy sticky Codex selection when v%s storage omitted the provider",
+    async (version) => {
+      vi.useFakeTimers();
+      try {
+        const stickySelection = modelSelection(CODEX_DRIVER, "gpt-5.6-terra", {
+          reasoningEffort: "xhigh",
+        });
+        const storage = useComposerDraftStore.persist.getOptions().storage;
+        expect(storage).toBeDefined();
+        storage?.setItem(COMPOSER_DRAFT_STORAGE_KEY, {
+          version,
+          state: {
+            draftsByThreadId: {},
+            draftThreadsByThreadId: {},
+            projectDraftThreadIdByProjectId: {},
+            stickyModel: stickySelection.model,
+            stickyModelOptions: providerModelOptions({
+              [CODEX_DRIVER]: { reasoningEffort: "xhigh" },
+            }),
+          },
+        } as never);
+        await vi.advanceTimersByTimeAsync(300);
+
+        await useComposerDraftStore.persist.rehydrate();
+
+        expect(useComposerDraftStore.getState()).toMatchObject({
+          stickyModelSelectionByProvider: { [CODEX_INSTANCE]: stickySelection },
+          stickyActiveProvider: null,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("strips seeded models only from empty draft sessions when upgrading storage", async () => {
     vi.useFakeTimers();
     try {
