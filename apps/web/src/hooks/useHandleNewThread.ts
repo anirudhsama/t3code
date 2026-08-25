@@ -24,7 +24,10 @@ import {
 } from "../logicalProject";
 import { resolveDefaultThreadEnvMode } from "@t3tools/shared/threadEnvMode";
 import { readThreadShell, useProjects, useThread } from "../state/entities";
-import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
+import {
+  resolveNewDraftStartFromOrigin,
+  resolveNewThreadModelSelectionOverride,
+} from "../lib/chatThreadActions";
 import { readT3ProjectFileDefaultThreadEnvMode } from "../lib/t3ProjectFileDefaults";
 import { primaryServerSettingsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
@@ -160,7 +163,14 @@ export function useNewThreadHandler() {
           candidate.id === projectRef.projectId &&
           candidate.environmentId === projectRef.environmentId,
       );
-      const modelSelectionOverride = project?.defaultModelSelection ?? carryModelSelection;
+      const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
+        resolveNewThreadModelSelectionOverride({
+          projectDefaultSelection: project?.defaultModelSelection ?? null,
+          carrySelection: carryModelSelection,
+          carrySourceDraftId:
+            currentRouteTarget?.kind === "draft" ? currentRouteTarget.draftId : null,
+          destinationDraftId,
+        });
       // The shared resolver owns the priority order. The t3.json read is
       // skipped entirely when a higher-priority source decides, and its
       // query atom caches per project after the first call.
@@ -294,6 +304,9 @@ export function useNewThreadHandler() {
             Boolean(storedActiveSelection) && storedDraft?.modelSelectionExplicit === true;
           if (!storedDraftHasExplicitModelPick) {
             applyStickyState(emptyStoredDraftThread.draftId);
+            const modelSelectionOverride = resolveModelSelectionOverride(
+              emptyStoredDraftThread.draftId,
+            );
             if (modelSelectionOverride) {
               // This is a complete snapshot: absent options mean "no options",
               // not "keep the stale draft's options".
@@ -429,6 +442,7 @@ export function useNewThreadHandler() {
           ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
         });
         applyStickyState(draftId);
+        const modelSelectionOverride = resolveModelSelectionOverride(draftId);
         if (modelSelectionOverride) {
           // Project defaults and carried selections both outrank global sticky
           // state. The project default wins when both are present.
