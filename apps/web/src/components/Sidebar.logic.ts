@@ -1,5 +1,6 @@
 import * as React from "react";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
+import { hasUnseenThreadCompletion } from "@t3tools/client-runtime/state/thread-read-state";
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import {
@@ -314,14 +315,7 @@ export function useThreadJumpHintVisibility(): {
 }
 
 export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
-  if (!thread.latestTurn?.completedAt) return false;
-  const completedAt = Date.parse(thread.latestTurn.completedAt);
-  if (Number.isNaN(completedAt)) return false;
-  if (!thread.lastVisitedAt) return false;
-
-  const lastVisitedAt = Date.parse(thread.lastVisitedAt);
-  if (Number.isNaN(lastVisitedAt)) return true;
-  return completedAt > lastVisitedAt;
+  return hasUnseenThreadCompletion(thread, thread.lastVisitedAt);
 }
 
 export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {
