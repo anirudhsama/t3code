@@ -1,11 +1,11 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { canSettle, canSnooze } from "@t3tools/client-runtime/state/thread-settled";
+import { canSnooze } from "@t3tools/client-runtime/state/thread-settled";
 import * as Cause from "effect/Cause";
 import * as Haptics from "expo-haptics";
 import { useCallback, useRef } from "react";
 import { Alert } from "react-native";
 
-import { showConfirmDialog } from "../../components/ConfirmDialogHost";
+import { showConfirmDialog, showTextInputDialog } from "../../components/ConfirmDialogHost";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { refreshArchivedThreadsForEnvironment } from "../archive/useArchivedThreadSnapshots";
 import {
@@ -118,16 +118,6 @@ function useThreadActionExecutor(
           );
           return false;
         }
-        // Settle may only target what effectiveSettled could classify as
-        // settled: not starting/running sessions, not threads waiting on
-        // approvals or user input. Anything else would hide live work.
-        if (action === "settle" && !canSettle(thread, { now: new Date().toISOString() })) {
-          Alert.alert(
-            actionFailureTitle(action),
-            "This thread still needs attention. Resolve or interrupt it first, then try again.",
-          );
-          return false;
-        }
         // Archive keeps its original, narrower guard: never interrupt a
         // thread mid-turn.
         if (
@@ -232,11 +222,12 @@ export function useThreadListActions(): {
   readonly unsettleThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
   readonly pinThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
   readonly unpinThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
+  readonly renameThread: (thread: EnvironmentThreadShell) => void;
+  readonly regenerateThreadTitle: (thread: EnvironmentThreadShell) => Promise<boolean>;
   readonly movePinnedThread: (
     thread: EnvironmentThreadShell,
     direction: "up" | "down",
   ) => Promise<boolean>;
-  readonly regenerateThreadTitle: (thread: EnvironmentThreadShell) => Promise<boolean>;
 } {
   const executeAction = useThreadActionExecutor();
   const snoozeMutation = useAtomCommand(threadEnvironment.snooze, { reportFailure: false });
@@ -460,6 +451,35 @@ export function useThreadListActions(): {
     },
     [updateThreadMetadata],
   );
+  const renameThread = useCallback(
+    (thread: EnvironmentThreadShell) => {
+      showTextInputDialog({
+        title: "Rename thread",
+        defaultValue: thread.title,
+        confirmText: "Rename",
+        onSubmit: (value) => {
+          const title = value.trim();
+          if (title.length === 0 || title === thread.title) return;
+          void (async () => {
+            const result = await updateThreadMetadata({
+              environmentId: thread.environmentId,
+              input: { threadId: thread.id, title },
+            });
+            if (result._tag === "Failure") {
+              const error = Cause.squash(result.cause);
+              Alert.alert(
+                "Could not rename thread",
+                error instanceof Error && error.message.trim().length > 0
+                  ? error.message
+                  : "The thread could not be renamed.",
+              );
+            }
+          })();
+        },
+      });
+    },
+    [updateThreadMetadata],
+  );
 
   // Move up / Move down for the pinned block. Computed against the CANONICAL
   // keyed pinned order (not the rendered list), so the move is valid even
@@ -551,8 +571,9 @@ export function useThreadListActions(): {
     unsettleThread,
     pinThread,
     unpinThread,
-    movePinnedThread,
+    renameThread,
     regenerateThreadTitle,
+    movePinnedThread,
   };
 }
 

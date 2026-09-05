@@ -1,7 +1,7 @@
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
 import { useNavigation } from "@react-navigation/native";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Platform, useWindowDimensions } from "react-native";
 
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
@@ -12,11 +12,13 @@ import { useSavedRemoteConnections } from "../../state/use-remote-environment-re
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { WorkspaceEmptyDetail } from "../layout/WorkspaceEmptyDetail";
 import { WorkspaceSidebarToolbar } from "../layout/workspace-sidebar-toolbar";
+import { seedNewTaskDraftFromThread } from "../threads/new-thread-from-thread";
 import { checkForAppUpdateOnLaunch, startAppUpdateForegroundRecheck } from "../updates/app-updates";
 import { AndroidHomeFabLayout } from "./AndroidHomeFab";
 import { HomeScreen } from "./HomeScreen";
 import { HomeHeader } from "./HomeHeader";
 import { useHomeListOptions } from "./home-list-options";
+import { useHomeThreadSelection } from "./home-thread-navigation";
 import { buildHomeProjectScopes } from "./homeThreadList";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 import { useThreadListActions } from "./useThreadListActions";
@@ -33,6 +35,7 @@ export function HomeRouteScreen() {
   const { savedConnectionsById } = useSavedRemoteConnections();
   const navigation = useNavigation();
   const [searchQuery, setSearchQuery] = useState("");
+  const handleSelectThread = useHomeThreadSelection();
 
   useEffect(() => {
     void checkForAppUpdateOnLaunch();
@@ -48,8 +51,9 @@ export function HomeRouteScreen() {
     pinThread,
     unpinThread,
     movePinnedThread,
-    regenerateThreadTitle,
     unsettleThread,
+    renameThread,
+    regenerateThreadTitle,
   } = useThreadListActions();
   const pendingTasks = usePendingNewTasks();
   const { openPendingTask, confirmDeletePendingTask } = usePendingTaskListActions();
@@ -101,6 +105,24 @@ export function HomeRouteScreen() {
       setSelectedProjectKey(null);
     }
   }, [projectFilterOptions, selectedProjectKey]);
+  const openNewThreadFromThread = useCallback(
+    (thread: (typeof threads)[number]) => {
+      seedNewTaskDraftFromThread(thread);
+      const project = projects.find(
+        (candidate) =>
+          candidate.environmentId === thread.environmentId && candidate.id === thread.projectId,
+      );
+      navigation.navigate("NewTaskSheet", {
+        screen: "NewTaskDraft",
+        params: {
+          environmentId: String(thread.environmentId),
+          projectId: String(thread.projectId),
+          title: project?.title ?? "New task",
+        },
+      });
+    },
+    [navigation, projects],
+  );
 
   // In split layouts the persistent sidebar IS the thread list — Home becomes
   // an empty detail pane so selecting a thread never transitions layouts.
@@ -191,6 +213,8 @@ export function HomeRouteScreen() {
           }
           onArchiveThread={archiveThread}
           onDeleteThread={confirmDeleteThread}
+          onNewThreadFromThread={openNewThreadFromThread}
+          onRenameThread={renameThread}
           onSettleThread={settleThread}
           onSnoozeThread={snoozeThread}
           onUnsnoozeThread={unsnoozeThread}
@@ -209,14 +233,7 @@ export function HomeRouteScreen() {
           }
           onProjectSortOrderChange={setProjectSortOrder}
           onSearchQueryChange={setSearchQuery}
-          onSelectThread={(thread) => {
-            // Settled threads are live shells: opening one is plain
-            // navigation, and sending a message un-settles server-side.
-            navigation.navigate("Thread", {
-              environmentId: thread.environmentId,
-              threadId: thread.id,
-            });
-          }}
+          onSelectThread={handleSelectThread}
           onSelectPendingTask={openPendingTask}
           onDeletePendingTask={confirmDeletePendingTask}
           onNewThreadInProject={(project) => {
